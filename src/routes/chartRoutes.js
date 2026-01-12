@@ -4,7 +4,11 @@ import { query } from '../db/connection.js';
 
 const router = Router();
 
-// SLA Statistics (must be before :chartNumber route)
+// ═══════════════════════════════════════════════════════════════
+// STATIC ROUTES (must be before :chartNumber route)
+// ═══════════════════════════════════════════════════════════════
+
+// SLA Statistics
 router.get('/stats/sla', chartController.getSLAStats.bind(chartController));
 
 // Analytics endpoints
@@ -15,7 +19,9 @@ router.get('/analytics/dashboard', chartController.getDashboardAnalytics.bind(ch
 router.get('/filters/facilities', chartController.getFacilities.bind(chartController));
 router.get('/filters/specialties', chartController.getSpecialties.bind(chartController));
 
-// Debug endpoint - get raw data from database
+// ═══════════════════════════════════════════════════════════════
+// DEBUG ENDPOINT - get raw data from database with code analysis
+// ═══════════════════════════════════════════════════════════════
 router.get('/debug/:chartNumber', async (req, res) => {
   try {
     const { chartNumber } = req.params;
@@ -42,26 +48,93 @@ router.get('/debug/:chartNumber', async (req, res) => {
       [chart.id]
     );
 
+    // ═══════════════════════════════════════════════════════════════
+    // Calculate code-level accuracy for this chart (NEW)
+    // ═══════════════════════════════════════════════════════════════
+    const originalCodes = chart.original_ai_codes || {};
+    const modifications = chart.user_modifications || {};
+    const categories = ['ed_em_level', 'procedures', 'primary_diagnosis', 'secondary_diagnoses', 'modifiers'];
+
+    let totalAICodes = 0;
+    let modifiedCodes = 0;
+    let rejectedCodes = 0;
+    let addedCodes = 0;
+    const modificationDetails = [];
+
+    for (const category of categories) {
+      const origCount = Array.isArray(originalCodes[category]) ? originalCodes[category].length : 0;
+      totalAICodes += origCount;
+
+      const mods = Array.isArray(modifications[category]) ? modifications[category] : [];
+      mods.forEach(mod => {
+        if (mod.action === 'modified') {
+          modifiedCodes++;
+          modificationDetails.push({
+            category,
+            action: 'modified',
+            reason: mod.reason || 'No reason provided',
+            original: mod.original,
+            modified: mod.modified
+          });
+        } else if (mod.action === 'rejected') {
+          rejectedCodes++;
+          modificationDetails.push({
+            category,
+            action: 'rejected',
+            reason: mod.reason || 'No reason provided',
+            original: mod.original
+          });
+        } else if (mod.action === 'added') {
+          addedCodes++;
+          modificationDetails.push({
+            category,
+            action: 'added',
+            added: mod.added || mod.modified
+          });
+        }
+      });
+    }
+
+    const unchangedCodes = totalAICodes - modifiedCodes - rejectedCodes;
+    const aiAccuracy = totalAICodes > 0 ? ((unchangedCodes / totalAICodes) * 100).toFixed(1) : 'N/A';
+
     res.json({
       success: true,
       chart: {
         id: chart.id,
         chart_number: chart.chart_number,
         mrn: chart.mrn,
+        facility: chart.facility,
+        specialty: chart.specialty,
         ai_status: chart.ai_status,
         review_status: chart.review_status,
         original_ai_codes: chart.original_ai_codes,
         user_modifications: chart.user_modifications,
         final_codes: chart.final_codes,
-        submitted_at: chart.submitted_at
+        submitted_at: chart.submitted_at,
+        submitted_by: chart.submitted_by
+      },
+      // NEW: Code-level accuracy analysis
+      codeAnalysis: {
+        totalAICodes,
+        unchangedCodes,
+        modifiedCodes,
+        rejectedCodes,
+        addedCodes,
+        aiAccuracy: `${aiAccuracy}%`,
+        modificationDetails
       },
       documents: docsResult.rows,
-      message: 'Raw database data for debugging'
+      message: 'Raw database data with code-level analysis for debugging'
     });
   } catch (error) {
     res.status(500).json({ success: false, error: error.message });
   }
 });
+
+// ═══════════════════════════════════════════════════════════════
+// CHART CRUD OPERATIONS
+// ═══════════════════════════════════════════════════════════════
 
 // Get all charts (work queue)
 router.get('/', chartController.getCharts.bind(chartController));

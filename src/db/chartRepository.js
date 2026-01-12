@@ -3,7 +3,47 @@ import { query } from './connection.js';
 export const ChartRepository = {
 
   /**
-   * Create a new chart
+   * Create a new chart with 'queued' status (for async processing)
+   * Use this when documents are uploaded but not yet processed
+   */
+  async createQueued(chartData) {
+    const {
+      chartNumber,
+      mrn,
+      facility,
+      specialty,
+      dateOfService,
+      provider,
+      documentCount = 0
+    } = chartData;
+
+    const result = await query(
+      `INSERT INTO charts (
+        chart_number, mrn, facility, specialty, date_of_service, 
+        provider, document_count, ai_status, review_status
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, 'queued', 'pending')
+      ON CONFLICT (chart_number) 
+      DO UPDATE SET 
+        mrn = COALESCE(NULLIF(EXCLUDED.mrn, ''), charts.mrn),
+        facility = COALESCE(NULLIF(EXCLUDED.facility, ''), charts.facility),
+        specialty = COALESCE(NULLIF(EXCLUDED.specialty, ''), charts.specialty),
+        date_of_service = COALESCE(EXCLUDED.date_of_service, charts.date_of_service),
+        provider = COALESCE(NULLIF(EXCLUDED.provider, ''), charts.provider),
+        document_count = charts.document_count + EXCLUDED.document_count,
+        ai_status = CASE 
+          WHEN charts.ai_status IN ('ready', 'submitted') THEN charts.ai_status 
+          ELSE 'queued' 
+        END,
+        updated_at = CURRENT_TIMESTAMP
+      RETURNING *`,
+      [chartNumber, mrn, facility, specialty, dateOfService, provider, documentCount]
+    );
+
+    return result.rows[0];
+  },
+
+  /**
+   * Create a new chart (sets to 'processing' immediately - for sync processing)
    */
   async create(chartData) {
     const {
@@ -65,7 +105,8 @@ export const ChartRepository = {
         coding_notes = $8,
         sla_data = $9,
         original_ai_codes = $10,
-        processing_completed_at = CURRENT_TIMESTAMP
+        processing_completed_at = CURRENT_TIMESTAMP,
+        updated_at = CURRENT_TIMESTAMP
       WHERE chart_number = $1
       RETURNING *`,
       [
@@ -87,7 +128,6 @@ export const ChartRepository = {
 
   /**
    * Save user modifications to codes
-   * This tracks what the user changed, added, or removed with reasons
    */
   async saveUserModifications(chartNumber, modifications) {
     const result = await query(
@@ -105,7 +145,6 @@ export const ChartRepository = {
 
   /**
    * Submit final codes to NextCode
-   * Saves the final codes and marks as submitted
    */
   async submitFinalCodes(chartNumber, finalCodes, submittedBy = null) {
     const result = await query(
@@ -130,12 +169,16 @@ export const ChartRepository = {
     let queryText = `UPDATE charts SET ai_status = $2`;
     const params = [chartNumber, aiStatus];
 
+    if (aiStatus === 'processing') {
+      queryText += `, processing_started_at = CURRENT_TIMESTAMP`;
+    }
+
     if (reviewStatus) {
-      queryText += `, review_status = $3`;
+      queryText += `, review_status = $${params.length + 1}`;
       params.push(reviewStatus);
     }
 
-    queryText += ` WHERE chart_number = $1 RETURNING *`;
+    queryText += `, updated_at = CURRENT_TIMESTAMP WHERE chart_number = $1 RETURNING *`;
 
     const result = await query(queryText, params);
     return result.rows[0];
@@ -146,7 +189,7 @@ export const ChartRepository = {
    */
   async updateReviewStatus(chartNumber, reviewStatus) {
     const result = await query(
-      `UPDATE charts SET review_status = $2 WHERE chart_number = $1 RETURNING *`,
+      `UPDATE charts SET review_status = $2, updated_at = CURRENT_TIMESTAMP WHERE chart_number = $1 RETURNING *`,
       [chartNumber, reviewStatus]
     );
     return result.rows[0];
@@ -164,7 +207,7 @@ export const ChartRepository = {
   },
 
   /**
-   * Get chart with documents - includes original_ai_codes and user_modifications
+   * Get chart with documents
    */
   async getWithDocuments(chartNumber) {
     const chartResult = await query(
@@ -271,12 +314,13 @@ export const ChartRepository = {
   },
 
   /**
-   * Get SLA statistics
+   * Get SLA statistics - includes 'queued' status
    */
   async getSLAStats() {
     const result = await query(`
       SELECT 
         COUNT(*) FILTER (WHERE ai_status = 'ready' AND review_status = 'pending') as pending_review,
+        COUNT(*) FILTER (WHERE ai_status = 'queued') as queued,
         COUNT(*) FILTER (WHERE ai_status = 'processing') as processing,
         COUNT(*) FILTER (WHERE review_status = 'in_review') as in_review,
         COUNT(*) FILTER (WHERE review_status = 'submitted') as submitted,
@@ -298,8 +342,76 @@ export const ChartRepository = {
   },
 
   /**
-     * Get analytics data for modifications
-     */
+   * Get transaction statistics
+   * A transaction = 1 PDF upload OR 1 image group upload
+   */
+  async getTransactionStats() {
+    const result = await query(`
+      SELECT 
+        COUNT(DISTINCT transaction_id) as total_transactions,
+        COUNT(DISTINCT transaction_id) FILTER (WHERE is_group_member = FALSE) as pdf_transactions,
+        COUNT(DISTINCT transaction_id) FILTER (WHERE is_group_member = TRUE) as image_group_transactions,
+        COUNT(*) as total_files,
+        COUNT(*) FILTER (WHERE mime_type = 'application/pdf') as total_pdfs,
+        COUNT(*) FILTER (WHERE mime_type LIKE 'image/%') as total_images
+      FROM documents
+      WHERE transaction_id IS NOT NULL
+    `);
+
+    return result.rows[0];
+  },
+
+  /**
+   * Get combined dashboard stats (charts + transactions)
+   */
+  async getDashboardStats() {
+    // Get chart stats
+    const chartStats = await query(`
+      SELECT 
+        COUNT(*) FILTER (WHERE ai_status = 'ready' AND review_status = 'pending') as pending_review,
+        COUNT(*) FILTER (WHERE ai_status = 'queued') as queued,
+        COUNT(*) FILTER (WHERE ai_status = 'processing') as processing,
+        COUNT(*) FILTER (WHERE review_status = 'in_review') as in_review,
+        COUNT(*) FILTER (WHERE review_status = 'submitted') as submitted,
+        COUNT(*) as total
+      FROM charts
+    `);
+
+    // Get transaction stats (all transactions)
+    const transactionStats = await query(`
+      SELECT 
+        COUNT(DISTINCT transaction_id) as total_transactions,
+        COUNT(DISTINCT transaction_id) FILTER (WHERE is_group_member = FALSE) as pdf_transactions,
+        COUNT(DISTINCT transaction_id) FILTER (WHERE is_group_member = TRUE) as image_group_transactions,
+        COUNT(*) as total_files
+      FROM documents
+      WHERE transaction_id IS NOT NULL
+    `);
+
+    // Get done transactions (transactions from submitted charts)
+    const doneTransactionStats = await query(`
+      SELECT 
+        COUNT(DISTINCT d.transaction_id) as done_transactions,
+        COUNT(DISTINCT d.transaction_id) FILTER (WHERE d.is_group_member = FALSE) as done_pdf_transactions,
+        COUNT(DISTINCT d.transaction_id) FILTER (WHERE d.is_group_member = TRUE) as done_image_group_transactions
+      FROM documents d
+      JOIN charts c ON c.id = d.chart_id
+      WHERE d.transaction_id IS NOT NULL
+      AND c.review_status = 'submitted'
+    `);
+
+    return {
+      charts: chartStats.rows[0],
+      transactions: {
+        ...transactionStats.rows[0],
+        ...doneTransactionStats.rows[0]
+      }
+    };
+  },
+
+  /**
+   * Get analytics data for modifications
+   */
   async getModificationAnalytics(filters = {}) {
     const { startDate, endDate, facility } = filters;
 
@@ -327,7 +439,6 @@ export const ChartRepository = {
 
     const whereClause = `WHERE ${whereConditions.join(' AND ')}`;
 
-    // Get individual chart data - NO aggregate functions, just select the rows
     const result = await query(`
       SELECT 
         original_ai_codes,
@@ -359,7 +470,7 @@ export const ChartRepository = {
 export const DocumentRepository = {
 
   /**
-   * Add document to chart with S3 info
+   * Add document to chart with S3 info and transaction tracking
    */
   async create(chartId, documentData) {
     const {
@@ -370,35 +481,19 @@ export const DocumentRepository = {
       mimeType,
       s3Key,
       s3Url,
-      s3Bucket
+      s3Bucket,
+      transactionId = null,
+      transactionLabel = null,
+      isGroupMember = false
     } = documentData;
 
     const result = await query(
       `INSERT INTO documents (
         chart_id, document_type, filename, original_name, file_size, mime_type,
-        s3_key, s3_url, s3_bucket
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+        s3_key, s3_url, s3_bucket, ocr_status, transaction_id, transaction_label, is_group_member
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'pending', $10, $11, $12)
       RETURNING *`,
-      [chartId, documentType, filename, originalName, fileSize, mimeType, s3Key, s3Url, s3Bucket]
-    );
-
-    return result.rows[0];
-  },
-
-  /**
-   * Update document with OCR results and AI summary
-   */
-  async updateWithOCRAndSummary(documentId, ocrText, ocrProcessingTime, aiDocumentSummary) {
-    const result = await query(
-      `UPDATE documents SET 
-        ocr_text = $2, 
-        ocr_status = 'completed',
-        ocr_processing_time = $3,
-        ocr_completed_at = CURRENT_TIMESTAMP,
-        ai_document_summary = $4
-      WHERE id = $1
-      RETURNING *`,
-      [documentId, ocrText, ocrProcessingTime, JSON.stringify(aiDocumentSummary)]
+      [chartId, documentType, filename, originalName, fileSize, mimeType, s3Key, s3Url, s3Bucket, transactionId, transactionLabel, isGroupMember]
     );
 
     return result.rows[0];
@@ -438,6 +533,22 @@ export const DocumentRepository = {
   },
 
   /**
+   * Mark document OCR as failed
+   */
+  async markOCRFailed(documentId, errorMessage = null) {
+    const result = await query(
+      `UPDATE documents SET 
+        ocr_status = 'failed',
+        ocr_completed_at = CURRENT_TIMESTAMP
+      WHERE id = $1
+      RETURNING *`,
+      [documentId]
+    );
+
+    return result.rows[0];
+  },
+
+  /**
    * Get documents by chart ID
    */
   async getByChartId(chartId) {
@@ -471,5 +582,16 @@ export const DocumentRepository = {
       [documentId]
     );
     return result.rows[0];
+  },
+
+  /**
+   * Get documents by transaction ID
+   */
+  async getByTransactionId(transactionId) {
+    const result = await query(
+      `SELECT * FROM documents WHERE transaction_id = $1 ORDER BY created_at`,
+      [transactionId]
+    );
+    return result.rows;
   }
 };

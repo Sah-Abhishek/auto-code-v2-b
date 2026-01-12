@@ -441,11 +441,19 @@ class ChartController {
   /**
    * Get comprehensive analytics for dashboard
    * GET /api/charts/analytics/dashboard
+   * 
+   * NEW: AI Accuracy is now calculated at the CODE level:
+   * - Count total AI codes generated (from original_ai_codes)
+   * - Count modified codes (action: 'modified' in user_modifications)
+   * - Count rejected codes (action: 'rejected' in user_modifications)
+   * - AI Accuracy = (totalAICodes - modifiedCodes - rejectedCodes) / totalAICodes * 100
+   * 
+   * Example: AI generated 5 codes, user changed 1 → Accuracy = 80%
    */
   async getDashboardAnalytics(req, res) {
     try {
       const { query } = await import('../db/connection.js');
-      const { period = '30' } = req.query; // days
+      const { period = '30' } = req.query;
       const periodDays = parseInt(period);
 
       // Get overall stats
@@ -456,25 +464,145 @@ class ChartController {
           COUNT(*) FILTER (WHERE review_status = 'pending') as pending_charts,
           COUNT(*) FILTER (WHERE review_status = 'in_review') as in_review_charts,
           COUNT(*) FILTER (WHERE ai_status = 'processing') as processing_charts,
+          COUNT(*) FILTER (WHERE ai_status = 'queued') as queued_charts,
           COUNT(*) FILTER (WHERE created_at >= NOW() - INTERVAL '${periodDays} days') as charts_in_period
         FROM charts
       `);
 
-      // Get acceptance rate (codes accepted without modification)
-      const acceptanceData = await query(`
+      // Get submitted charts with original codes and modifications for CODE-LEVEL accuracy
+      const submittedChartsData = await query(`
         SELECT 
-          COUNT(*) as total_submitted,
-          COUNT(*) FILTER (
-            WHERE user_modifications IS NULL 
-            OR user_modifications = '{}'
-            OR jsonb_typeof(user_modifications) = 'null'
-          ) as accepted_without_changes
-        FROM charts
+          original_ai_codes,
+          user_modifications,
+          final_codes,
+          facility,
+          specialty,
+          submitted_at,
+          processing_started_at,
+          processing_completed_at
+        FROM charts 
         WHERE review_status = 'submitted'
         AND submitted_at >= NOW() - INTERVAL '${periodDays} days'
       `);
 
-      // Get volume by facility
+      // ═══════════════════════════════════════════════════════════════
+      // CALCULATE AI ACCURACY AT CODE LEVEL (NEW IMPLEMENTATION)
+      // ═══════════════════════════════════════════════════════════════
+      const categories = ['ed_em_level', 'procedures', 'primary_diagnosis', 'secondary_diagnoses', 'modifiers'];
+
+      let totalAICodes = 0;
+      let modifiedCodes = 0;
+      let rejectedCodes = 0;
+      let addedCodes = 0;
+      const reasonCounts = {};
+
+      // Track weekly data for trends
+      const weeklyData = {};
+
+      submittedChartsData.rows.forEach(chart => {
+        const originalCodes = chart.original_ai_codes || {};
+        const modifications = chart.user_modifications || {};
+
+        // Get week key for trend tracking
+        let weekKey = 'unknown';
+        if (chart.submitted_at) {
+          const date = new Date(chart.submitted_at);
+          const weekStart = new Date(date);
+          weekStart.setDate(date.getDate() - date.getDay());
+          weekKey = weekStart.toISOString().split('T')[0];
+        }
+
+        if (!weeklyData[weekKey]) {
+          weeklyData[weekKey] = { totalCodes: 0, unchangedCodes: 0, charts: 0 };
+        }
+        weeklyData[weekKey].charts++;
+
+        let chartTotalCodes = 0;
+        let chartModified = 0;
+        let chartRejected = 0;
+
+        // Count original AI codes and modifications per category
+        for (const category of categories) {
+          // Count original AI codes in this category
+          const originalInCategory = Array.isArray(originalCodes[category])
+            ? originalCodes[category].length
+            : 0;
+
+          totalAICodes += originalInCategory;
+          chartTotalCodes += originalInCategory;
+
+          // Count modifications in this category
+          const categoryMods = Array.isArray(modifications[category])
+            ? modifications[category]
+            : [];
+
+          for (const mod of categoryMods) {
+            if (mod.action === 'modified') {
+              modifiedCodes++;
+              chartModified++;
+              if (mod.reason) {
+                reasonCounts[mod.reason] = (reasonCounts[mod.reason] || 0) + 1;
+              }
+            } else if (mod.action === 'rejected') {
+              rejectedCodes++;
+              chartRejected++;
+              if (mod.reason) {
+                reasonCounts[mod.reason] = (reasonCounts[mod.reason] || 0) + 1;
+              }
+            } else if (mod.action === 'added') {
+              addedCodes++;
+              // Added codes don't affect AI accuracy (they're user additions)
+            }
+          }
+        }
+
+        // Update weekly tracking
+        weeklyData[weekKey].totalCodes += chartTotalCodes;
+        weeklyData[weekKey].unchangedCodes += (chartTotalCodes - chartModified - chartRejected);
+      });
+
+      // Calculate unchanged codes
+      const unchangedCodes = totalAICodes - modifiedCodes - rejectedCodes;
+
+      // Calculate AI Accuracy: (unchanged / total) * 100
+      const aiAccuracy = totalAICodes > 0
+        ? ((unchangedCodes / totalAICodes) * 100)
+        : 0;
+
+      // Calculate correction rate: (modified + rejected) / total * 100
+      const correctionRate = totalAICodes > 0
+        ? (((modifiedCodes + rejectedCodes) / totalAICodes) * 100)
+        : 0;
+
+      // Total modifications count (for display)
+      const totalModifications = modifiedCodes + rejectedCodes;
+
+      // ═══════════════════════════════════════════════════════════════
+      // FORMAT WEEKLY TRENDS (using code-level accuracy)
+      // ═══════════════════════════════════════════════════════════════
+      const sortedWeeks = Object.keys(weeklyData).filter(k => k !== 'unknown').sort();
+      const formattedTrends = sortedWeeks.map((week, idx) => {
+        const data = weeklyData[week];
+        const weekAccuracy = data.totalCodes > 0
+          ? ((data.unchangedCodes / data.totalCodes) * 100)
+          : 0;
+
+        return {
+          week: `Week ${idx + 1}`,
+          date: week,
+          total: data.charts,
+          totalCodes: data.totalCodes,
+          unchangedCodes: data.unchangedCodes,
+          acceptanceRate: parseFloat(weekAccuracy.toFixed(1)),
+          accuracy: parseFloat(weekAccuracy.toFixed(1))
+        };
+      });
+
+      // ═══════════════════════════════════════════════════════════════
+      // GET OTHER ANALYTICS DATA (existing functionality preserved)
+      // ═══════════════════════════════════════════════════════════════
+
+      // Volume by facility
       const volumeByFacility = await query(`
         SELECT 
           facility,
@@ -486,51 +614,6 @@ class ChartController {
         ORDER BY chart_count DESC
         LIMIT 10
       `);
-
-      // Get weekly trends for acceptance rate
-      const weeklyTrends = await query(`
-        SELECT 
-          DATE_TRUNC('week', submitted_at) as week,
-          COUNT(*) as total,
-          COUNT(*) FILTER (
-            WHERE user_modifications IS NULL 
-            OR user_modifications = '{}'
-          ) as accepted
-        FROM charts
-        WHERE review_status = 'submitted'
-        AND submitted_at >= NOW() - INTERVAL '${periodDays} days'
-        GROUP BY DATE_TRUNC('week', submitted_at)
-        ORDER BY week
-      `);
-
-      // Get modification reasons breakdown
-      const modificationReasons = await query(`
-        SELECT user_modifications
-        FROM charts
-        WHERE review_status = 'submitted'
-        AND user_modifications IS NOT NULL
-        AND user_modifications != '{}'
-        AND submitted_at >= NOW() - INTERVAL '${periodDays} days'
-      `);
-
-      // Process modification reasons
-      const reasonCounts = {};
-      let totalModifications = 0;
-
-      modificationReasons.rows.forEach(row => {
-        if (row.user_modifications) {
-          Object.values(row.user_modifications).forEach(mods => {
-            if (Array.isArray(mods)) {
-              mods.forEach(mod => {
-                totalModifications++;
-                if (mod.reason) {
-                  reasonCounts[mod.reason] = (reasonCounts[mod.reason] || 0) + 1;
-                }
-              });
-            }
-          });
-        }
-      });
 
       // Get processing times
       const processingTimes = await query(`
@@ -552,6 +635,7 @@ class ChartController {
           ) as within_sla
         FROM charts
         WHERE review_status = 'submitted'
+        AND processing_completed_at IS NOT NULL
         AND submitted_at >= NOW() - INTERVAL '${periodDays} days'
       `);
 
@@ -563,98 +647,98 @@ class ChartController {
         WHERE created_at >= NOW() - INTERVAL '${periodDays} days'
       `);
 
-      // Get total codes for accuracy calculation
-      const codeAccuracy = await query(`
-        SELECT 
-          COUNT(*) as total_codes,
-          COUNT(*) FILTER (
-            WHERE user_modifications IS NULL 
-            OR user_modifications = '{}'
-          ) as unchanged_codes
-        FROM charts
-        WHERE review_status = 'submitted'
-        AND submitted_at >= NOW() - INTERVAL '${periodDays} days'
-      `);
+      // Specialty accuracy (calculated from code-level data)
+      const specialtyData = {};
+      submittedChartsData.rows.forEach(chart => {
+        if (chart.specialty) {
+          if (!specialtyData[chart.specialty]) {
+            specialtyData[chart.specialty] = { totalCodes: 0, unchangedCodes: 0 };
+          }
 
-      // Get specialty accuracy trends (by week)
-      const specialtyTrends = await query(`
-        SELECT 
-          DATE_TRUNC('week', submitted_at) as week,
+          const originalCodes = chart.original_ai_codes || {};
+          const modifications = chart.user_modifications || {};
+
+          let chartTotal = 0;
+          let chartChanged = 0;
+
+          for (const category of categories) {
+            const origCount = Array.isArray(originalCodes[category]) ? originalCodes[category].length : 0;
+            chartTotal += origCount;
+
+            const mods = Array.isArray(modifications[category]) ? modifications[category] : [];
+            mods.forEach(mod => {
+              if (mod.action === 'modified' || mod.action === 'rejected') {
+                chartChanged++;
+              }
+            });
+          }
+
+          specialtyData[chart.specialty].totalCodes += chartTotal;
+          specialtyData[chart.specialty].unchangedCodes += (chartTotal - chartChanged);
+        }
+      });
+
+      const specialtyAccuracy = Object.entries(specialtyData)
+        .map(([specialty, data]) => ({
+          week: specialty,
           specialty,
-          COUNT(*) as total,
-          COUNT(*) FILTER (
-            WHERE user_modifications IS NULL 
-            OR user_modifications = '{}'
-          ) as accurate
-        FROM charts
-        WHERE review_status = 'submitted'
-        AND submitted_at >= NOW() - INTERVAL '${periodDays} days'
-        AND specialty IS NOT NULL
-        GROUP BY DATE_TRUNC('week', submitted_at), specialty
-        ORDER BY week
-      `);
+          accuracy: data.totalCodes > 0
+            ? parseFloat(((data.unchangedCodes / data.totalCodes) * 100).toFixed(1))
+            : 0,
+          totalCodes: data.totalCodes
+        }))
+        .sort((a, b) => b.totalCodes - a.totalCodes);
 
       // Calculate metrics
-      const totalSubmitted = parseInt(acceptanceData.rows[0]?.total_submitted || 0);
-      const acceptedWithoutChanges = parseInt(acceptanceData.rows[0]?.accepted_without_changes || 0);
-      const acceptanceRate = totalSubmitted > 0 ? (acceptedWithoutChanges / totalSubmitted * 100) : 0;
-
       const slaTotal = parseInt(slaCompliance.rows[0]?.total || 0);
       const slaWithin = parseInt(slaCompliance.rows[0]?.within_sla || 0);
       const slaComplianceRate = slaTotal > 0 ? (slaWithin / slaTotal * 100) : 0;
 
-      // Calculate overall accuracy from actual data
-      const totalCodes = parseInt(codeAccuracy.rows[0]?.total_codes || 0);
-      const unchangedCodes = parseInt(codeAccuracy.rows[0]?.unchanged_codes || 0);
-      const overallAccuracy = totalCodes > 0 ? (unchangedCodes / totalCodes * 100) : 0;
-
-      // Format weekly trends
-      const formattedTrends = weeklyTrends.rows.map((row, idx) => ({
-        week: `Week ${idx + 1}`,
-        date: row.week,
-        total: parseInt(row.total),
-        accepted: parseInt(row.accepted),
-        acceptanceRate: row.total > 0 ? parseFloat((parseInt(row.accepted) / parseInt(row.total) * 100).toFixed(1)) : 0
-      }));
-
-      // Format specialty accuracy trends
-      const specialtyAccuracyByWeek = {};
-      specialtyTrends.rows.forEach(row => {
-        const weekKey = row.week?.toISOString() || 'unknown';
-        if (!specialtyAccuracyByWeek[weekKey]) {
-          specialtyAccuracyByWeek[weekKey] = { week: weekKey, specialties: {} };
-        }
-        const accuracy = row.total > 0 ? (parseInt(row.accurate) / parseInt(row.total) * 100) : 0;
-        specialtyAccuracyByWeek[weekKey].specialties[row.specialty] = accuracy;
-      });
-
-      const formattedSpecialtyTrends = Object.values(specialtyAccuracyByWeek).map((item, idx) => ({
-        week: `Week ${idx + 1}`,
-        ...item.specialties,
-        accuracy: Object.values(item.specialties).length > 0
-          ? Object.values(item.specialties).reduce((a, b) => a + b, 0) / Object.values(item.specialties).length
-          : 0
-      }));
-
       // Format correction reasons (top 5)
+      const totalReasonCount = Object.values(reasonCounts).reduce((a, b) => a + b, 0);
       const sortedReasons = Object.entries(reasonCounts)
         .sort((a, b) => b[1] - a[1])
         .slice(0, 5)
         .map(([reason, count]) => ({
           reason,
           count,
-          percentage: totalModifications > 0 ? parseFloat((count / totalModifications * 100).toFixed(1)) : 0
+          percentage: totalReasonCount > 0 ? parseFloat((count / totalReasonCount * 100).toFixed(1)) : 0
         }));
 
-      // Build dynamic alerts based on real data
+      // Build dynamic alerts
       const alerts = [];
       const pendingCharts = parseInt(overallStats.rows[0]?.pending_charts || 0);
+      const queuedCharts = parseInt(overallStats.rows[0]?.queued_charts || 0);
+
+      if (aiAccuracy < 70 && totalAICodes > 0) {
+        alerts.push({
+          type: 'warning',
+          title: 'Low AI Accuracy',
+          message: `AI accuracy is ${aiAccuracy.toFixed(1)}%, below 70% threshold`
+        });
+      }
+
+      if (correctionRate > 30 && totalAICodes > 0) {
+        alerts.push({
+          type: 'warning',
+          title: 'High Correction Rate',
+          message: `${correctionRate.toFixed(1)}% of AI codes required correction`
+        });
+      }
 
       if (pendingCharts > 0) {
         alerts.push({
           type: pendingCharts > 50 ? 'warning' : 'info',
           title: 'Queue Status',
           message: `${pendingCharts} charts pending review`
+        });
+      }
+
+      if (queuedCharts > 20) {
+        alerts.push({
+          type: 'warning',
+          title: 'Processing Queue',
+          message: `${queuedCharts} charts queued for AI processing`
         });
       }
 
@@ -674,22 +758,37 @@ class ChartController {
         });
       }
 
+      // ═══════════════════════════════════════════════════════════════
+      // BUILD RESPONSE
+      // ═══════════════════════════════════════════════════════════════
       res.json({
         success: true,
         analytics: {
           summary: {
-            aiAcceptanceRate: parseFloat(acceptanceRate.toFixed(1)),
+            // NEW: Code-level AI Accuracy
+            aiAccuracy: parseFloat(aiAccuracy.toFixed(1)),
+            // Keep aiAcceptanceRate as alias for backward compatibility
+            aiAcceptanceRate: parseFloat(aiAccuracy.toFixed(1)),
+            overallAccuracy: parseFloat(aiAccuracy.toFixed(1)),
+            correctionRate: parseFloat(correctionRate.toFixed(1)),
             chartsProcessed: parseInt(overallStats.rows[0]?.charts_in_period || 0),
-            overallAccuracy: parseFloat(overallAccuracy.toFixed(1)),
-            correctionRate: totalSubmitted > 0 ? parseFloat(((totalSubmitted - acceptedWithoutChanges) / totalSubmitted * 100).toFixed(1)) : 0,
-            totalModifications,
-            totalSubmitted
+            totalSubmitted: submittedChartsData.rows.length,
+            // NEW: Code-level metrics
+            totalAICodes,
+            unchangedCodes,
+            modifiedCodes,
+            rejectedCodes,
+            addedCodes,
+            totalModifications
           },
           trends: {
             acceptanceRate: formattedTrends,
             weeklyVolume: formattedTrends.map(t => ({ week: t.week, count: t.total }))
           },
-          specialtyAccuracy: formattedSpecialtyTrends,
+          specialtyAccuracy: specialtyAccuracy.length > 0 ? specialtyAccuracy : formattedTrends.map(t => ({
+            week: t.week,
+            accuracy: t.accuracy
+          })),
           volumeByFacility: volumeByFacility.rows.map(r => ({
             facility: r.facility,
             count: parseInt(r.chart_count)
@@ -703,6 +802,7 @@ class ChartController {
               parseFloat(processingTimes.rows[0]?.avg_review_min || 0)
             ).toFixed(1),
             queueBacklog: pendingCharts,
+            processingQueue: queuedCharts,
             slaCompliance: parseFloat(slaComplianceRate.toFixed(1)),
             chartsPerDay: parseFloat(chartsPerDay.rows[0]?.avg_per_day || 0).toFixed(1)
           },

@@ -17,13 +17,11 @@ class AIService {
 
 Your task is to analyze clinical documents and extract ALL applicable codes organized into these specific categories:
 
-1. **ED/EM Level**: Evaluation & Management codes for emergency department visits (99281-99285) or office/outpatient visits (99202-99215). Include MDM justification.
+1. **Reason for Admit**: The principal reason or condition that caused the patient to seek care. This is typically derived from the chief complaint and should be an ICD-10-CM code. This may differ from the primary diagnosis.
 
-2. **Procedures (CPT)**: ALL CPT procedure codes for procedures performed. Multiple procedures are common - include ALL that apply.
+2. **Primary Diagnosis (PDX)**: The SINGLE principal ICD-10-CM diagnosis code - the main condition established after study to be chiefly responsible for the visit.
 
-3. **Primary Diagnosis (PDX)**: The SINGLE principal ICD-10-CM diagnosis code - the main reason for the visit.
-
-4. **Secondary Diagnoses (SDX)**: ALL additional ICD-10-CM diagnosis codes. This typically includes:
+3. **Secondary Diagnoses (SDX)**: ALL additional ICD-10-CM diagnosis codes. This typically includes:
    - Conditions treated during the visit
    - Comorbidities affecting care (diabetes, hypertension, etc.)
    - Chronic conditions being monitored
@@ -33,7 +31,11 @@ Your task is to analyze clinical documents and extract ALL applicable codes orga
    
    IMPORTANT: Include ALL relevant secondary diagnoses - real medical charts often have 10-20+ secondary codes.
 
-5. **Modifiers**: ALL applicable modifiers for procedures and E/M codes. Common modifiers:
+4. **Procedures (CPT)**: ALL CPT procedure codes for procedures performed. Multiple procedures are common - include ALL that apply.
+
+5. **ED/EM Level**: Evaluation & Management codes for emergency department visits (99281-99285) or office/outpatient visits (99202-99215). Include MDM justification.
+
+6. **Modifiers**: ALL applicable modifiers for procedures and E/M codes. Common modifiers:
    - 25: Significant separate E/M with procedure
    - 59/XE/XS/XP/XU: Distinct procedural services
    - 76/77: Repeat procedures
@@ -41,7 +43,17 @@ Your task is to analyze clinical documents and extract ALL applicable codes orga
    - PT: Physical therapy
    - TC/26: Technical/Professional component
 
-6. **Feedback**: Documentation gaps, coding tips, and physician queries.
+7. **Detailed Clinical Summary**: Provide comprehensive clinical narrative including:
+   - Patient demographics (age, sex)
+   - Chief complaint with onset, duration, severity
+   - Detailed HPI with all relevant elements
+   - Physical examination findings by system
+   - Vital signs
+   - Assessment and plan
+   - Timeline of care
+   - Clinical alerts and critical findings
+
+8. **Feedback**: Documentation gaps, coding tips, and physician queries.
 
 CRITICAL REQUIREMENTS:
 - Extract ALL applicable codes, not just the most obvious ones
@@ -49,6 +61,7 @@ CRITICAL REQUIREMENTS:
 - Use the most specific ICD-10 code possible (include all digits)
 - Real charts typically have multiple procedures and many secondary diagnoses
 - Be thorough - missing codes means missed revenue and incomplete clinical picture
+- Provide detailed, actionable clinical summaries
 
 OUTPUT FORMAT: Valid JSON only, no markdown.`;
   }
@@ -69,7 +82,7 @@ ${lines}
 `;
     }).join('\n\n');
 
-    return `Analyze the following clinical documents and extract ALL applicable medical codes.
+    return `Analyze the following clinical documents and extract ALL applicable medical codes with a detailed clinical summary.
 
 PATIENT INFORMATION:
 - MRN: ${chartInfo.mrn || 'Not provided'}
@@ -85,8 +98,18 @@ Extract ALL codes and respond with this JSON structure:
 
 {
   "ai_narrative_summary": {
+    "patient_demographics": {
+      "age": "Patient age if found",
+      "sex": "Patient sex if found",
+      "weight": "Weight if documented",
+      "allergies": ["List of allergies"]
+    },
     "chief_complaint": {
-      "text": "Brief description",
+      "text": "Detailed chief complaint - what brought the patient in",
+      "onset": "When symptoms started",
+      "duration": "How long symptoms have persisted",
+      "severity": "Severity rating or description",
+      "associated_symptoms": ["List of associated symptoms"],
       "evidence": {
         "document_type": "",
         "document_name": "",
@@ -95,7 +118,15 @@ Extract ALL codes and respond with this JSON structure:
       }
     },
     "history_of_present_illness": {
-      "text": "HPI summary",
+      "text": "Comprehensive HPI narrative covering all 8 elements where documented",
+      "location": "Where is the problem",
+      "quality": "Character of the symptom",
+      "severity": "1-10 or descriptive",
+      "duration": "How long",
+      "timing": "When does it occur",
+      "context": "What was patient doing",
+      "modifying_factors": "What makes it better/worse",
+      "associated_signs_symptoms": "Related findings",
       "evidence": {
         "document_type": "",
         "document_name": "",
@@ -103,11 +134,88 @@ Extract ALL codes and respond with this JSON structure:
         "exact_text": ""
       }
     },
+    "review_of_systems": {
+      "constitutional": "Fever, weight loss, fatigue, etc.",
+      "cardiovascular": "Chest pain, palpitations, edema, etc.",
+      "respiratory": "SOB, cough, wheezing, etc.",
+      "gastrointestinal": "N/V, diarrhea, abdominal pain, etc.",
+      "musculoskeletal": "Joint pain, swelling, weakness, etc.",
+      "neurological": "Headache, dizziness, numbness, etc.",
+      "psychiatric": "Depression, anxiety, etc.",
+      "other_systems": "Any other documented systems"
+    },
+    "past_medical_history": {
+      "conditions": ["List of past medical conditions"],
+      "surgeries": ["List of past surgeries"],
+      "hospitalizations": ["List of past hospitalizations"]
+    },
+    "medications": {
+      "current": ["List of current medications with doses"],
+      "allergies": ["Drug allergies"]
+    },
+    "social_history": {
+      "tobacco": "Tobacco use status",
+      "alcohol": "Alcohol use status",
+      "drugs": "Drug use status",
+      "occupation": "Occupation if relevant",
+      "living_situation": "Living situation if documented"
+    },
+    "family_history": {
+      "relevant_conditions": ["List of relevant family history"]
+    },
+    "physical_examination": {
+      "general": "General appearance",
+      "vitals": {
+        "blood_pressure": "",
+        "heart_rate": "",
+        "respiratory_rate": "",
+        "temperature": "",
+        "oxygen_saturation": "",
+        "pain_score": ""
+      },
+      "heent": "Head, eyes, ears, nose, throat exam",
+      "neck": "Neck examination",
+      "cardiovascular": "Heart exam findings",
+      "respiratory": "Lung exam findings",
+      "abdomen": "Abdominal exam findings",
+      "extremities": "Extremity exam",
+      "neurological": "Neuro exam",
+      "skin": "Skin exam",
+      "psychiatric": "Mental status"
+    },
+    "diagnostic_results": {
+      "labs": [
+        {
+          "test": "Test name",
+          "value": "Result value",
+          "unit": "Unit",
+          "flag": "normal/high/low/critical",
+          "clinical_significance": "Why this matters"
+        }
+      ],
+      "imaging": [
+        {
+          "study": "Study name",
+          "findings": "Key findings",
+          "impression": "Radiologist impression"
+        }
+      ],
+      "ekg": "EKG findings if performed",
+      "other_tests": ["Other diagnostic tests"]
+    },
+    "assessment_and_plan": {
+      "assessment": "Clinical assessment summary - what the provider concluded",
+      "diagnoses": ["List of diagnoses addressed"],
+      "plan": "Treatment plan summary",
+      "disposition": "Discharge, admit, transfer, etc.",
+      "follow_up": "Follow up instructions"
+    },
     "timeline_of_care": [
       {
-        "time": "",
-        "event": "",
-        "description": "",
+        "time": "Time of event",
+        "event": "What happened",
+        "description": "Details of the event",
+        "provider": "Who was involved",
         "evidence": {
           "document_type": "",
           "document_name": "",
@@ -118,8 +226,9 @@ Extract ALL codes and respond with this JSON structure:
     ],
     "clinical_alerts": [
       {
-        "alert": "",
+        "alert": "Important clinical finding or concern",
         "severity": "high/medium/low",
+        "action_required": "What should be done",
         "evidence": {
           "document_type": "",
           "document_name": "",
@@ -127,21 +236,17 @@ Extract ALL codes and respond with this JSON structure:
           "exact_text": ""
         }
       }
-    ]
+    ],
+    "attending_provider": "Attending physician name",
+    "consulting_providers": ["List of consultants"]
   },
   "coding_categories": {
-    "ed_em_level": {
+    "reason_for_admit": {
       "codes": [
         {
-          "code": "99283",
-          "description": "Emergency department visit, moderate severity",
-          "level_justification": {
-            "mdm_complexity": "Moderate",
-            "number_of_diagnoses": "Single diagnosis",
-            "data_reviewed": "What data was reviewed",
-            "risk_of_complications": "Risk level and why"
-          },
-          "ai_reasoning": "Detailed reasoning for this E/M level",
+          "icd_10_code": "R10.9",
+          "description": "Unspecified abdominal pain",
+          "ai_reasoning": "This is the reason the patient presented to the ED - the chief complaint that drove the encounter",
           "confidence": "high",
           "evidence": [
             {
@@ -154,32 +259,12 @@ Extract ALL codes and respond with this JSON structure:
         }
       ]
     },
-    "procedures": {
-      "codes": [
-        {
-          "cpt_code": "45378",
-          "procedure_name": "Colonoscopy, flexible; diagnostic",
-          "description": "Description of procedure performed",
-          "provider": "Provider name if found",
-          "date": "Date performed",
-          "findings": ["Finding 1", "Finding 2"],
-          "ai_reasoning": "Why this code was selected",
-          "confidence": "high",
-          "evidence": {
-            "document_type": "",
-            "document_name": "",
-            "line_number": "",
-            "exact_text": ""
-          }
-        }
-      ]
-    },
     "primary_diagnosis": {
       "codes": [
         {
-          "icd_10_code": "Z12.11",
-          "description": "Encounter for screening for malignant neoplasm of colon",
-          "ai_reasoning": "This is the main reason for the encounter",
+          "icd_10_code": "K35.80",
+          "description": "Unspecified acute appendicitis",
+          "ai_reasoning": "This is the main condition established after study - the primary diagnosis after workup",
           "confidence": "high",
           "evidence": [
             {
@@ -195,38 +280,54 @@ Extract ALL codes and respond with this JSON structure:
     "secondary_diagnoses": {
       "codes": [
         {
-          "icd_10_code": "K635",
-          "description": "Polyp of colon",
-          "ai_reasoning": "Finding from procedure",
-          "confidence": "high",
-          "evidence": [
-            {
-              "document_type": "",
-              "document_name": "",
-              "line_number": "",
-              "exact_text": ""
-            }
-          ]
-        },
-        {
-          "icd_10_code": "Z83.71",
-          "description": "Family history of colonic polyps",
-          "ai_reasoning": "Documented family history relevant to screening",
-          "confidence": "high",
-          "evidence": [
-            {
-              "document_type": "",
-              "document_name": "",
-              "line_number": "",
-              "exact_text": ""
-            }
-          ]
-        },
-        {
           "icd_10_code": "E11.9",
           "description": "Type 2 diabetes mellitus without complications",
-          "ai_reasoning": "Documented comorbidity",
-          "confidence": "medium",
+          "ai_reasoning": "Documented comorbidity affecting care",
+          "confidence": "high",
+          "evidence": [
+            {
+              "document_type": "",
+              "document_name": "",
+              "line_number": "",
+              "exact_text": ""
+            }
+          ]
+        }
+      ]
+    },
+    "procedures": {
+      "codes": [
+        {
+          "cpt_code": "99284",
+          "procedure_name": "ED visit, moderate-high severity",
+          "description": "Description of procedure performed",
+          "provider": "Provider name if found",
+          "date": "Date performed",
+          "findings": ["Finding 1", "Finding 2"],
+          "ai_reasoning": "Why this code was selected",
+          "confidence": "high",
+          "evidence": {
+            "document_type": "",
+            "document_name": "",
+            "line_number": "",
+            "exact_text": ""
+          }
+        }
+      ]
+    },
+    "ed_em_level": {
+      "codes": [
+        {
+          "code": "99284",
+          "description": "Emergency department visit, moderate-high severity",
+          "level_justification": {
+            "mdm_complexity": "Moderate to High",
+            "number_of_diagnoses": "Multiple diagnoses addressed",
+            "data_reviewed": "Labs, imaging reviewed",
+            "risk_of_complications": "Moderate risk - prescription drug management"
+          },
+          "ai_reasoning": "Detailed reasoning for this E/M level selection",
+          "confidence": "high",
           "evidence": [
             {
               "document_type": "",
@@ -241,23 +342,10 @@ Extract ALL codes and respond with this JSON structure:
     "modifiers": {
       "codes": [
         {
-          "modifier_code": "PT",
-          "modifier_name": "Colorectal cancer screening test",
-          "applies_to_code": "45378",
-          "ai_reasoning": "Screening colonoscopy qualifier",
-          "confidence": "high",
-          "evidence": {
-            "document_type": "",
-            "document_name": "",
-            "line_number": "",
-            "exact_text": ""
-          }
-        },
-        {
-          "modifier_code": "XS",
-          "modifier_name": "Separate Structure",
-          "applies_to_code": "45385",
-          "ai_reasoning": "Distinct anatomic site for additional procedure",
+          "modifier_code": "25",
+          "modifier_name": "Significant, Separately Identifiable E/M Service",
+          "applies_to_code": "99284",
+          "ai_reasoning": "E/M service provided in addition to procedure",
           "confidence": "high",
           "evidence": {
             "document_type": "",
@@ -272,38 +360,44 @@ Extract ALL codes and respond with this JSON structure:
   "feedback": {
     "documentation_gaps": [
       {
-        "gap": "Description of gap",
-        "impact": "How this affects coding",
-        "suggestion": "What documentation would help"
+        "gap": "Description of documentation gap",
+        "impact": "How this affects coding accuracy or reimbursement",
+        "suggestion": "What documentation would help",
+        "priority": "high/medium/low"
       }
     ],
     "physician_queries_needed": [
       {
         "query": "Question for physician",
         "reason": "Why this clarification is needed",
+        "impact_on_coding": "How the answer would change coding",
         "priority": "high/medium/low"
       }
     ],
     "coding_tips": [
       {
-        "tip": "Coding recommendation",
-        "related_code": "Code this relates to"
+        "tip": "Coding recommendation or optimization",
+        "related_code": "Code this relates to",
+        "potential_impact": "Revenue or compliance impact"
       }
     ],
     "compliance_alerts": [
       {
         "alert": "Compliance concern",
-        "severity": "high/medium/low"
+        "regulation": "Relevant regulation or guideline",
+        "severity": "high/medium/low",
+        "recommended_action": "What to do"
       }
     ]
   },
   "medications": [
     {
-      "name": "",
-      "dose": "",
-      "route": "",
-      "frequency": "",
-      "indication": ""
+      "name": "Medication name",
+      "dose": "Dose",
+      "route": "Route of administration",
+      "frequency": "Frequency",
+      "indication": "Why prescribed",
+      "new_or_existing": "new/existing"
     }
   ],
   "vitals_summary": {
@@ -311,14 +405,16 @@ Extract ALL codes and respond with this JSON structure:
     "heart_rate": "",
     "respiratory_rate": "",
     "temperature": "",
-    "oxygen_saturation": ""
+    "oxygen_saturation": "",
+    "pain_score": ""
   },
   "lab_results_summary": [
     {
-      "test": "",
-      "value": "",
-      "unit": "",
-      "flag": "normal/high/low/critical"
+      "test": "Test name",
+      "value": "Result",
+      "unit": "Unit",
+      "flag": "normal/high/low/critical",
+      "clinical_significance": "Why this matters"
     }
   ],
   "metadata": {
@@ -327,20 +423,26 @@ Extract ALL codes and respond with this JSON structure:
     "date_of_service": "${chartInfo.dateOfService || ''}",
     "facility": "${chartInfo.facility || ''}",
     "attending_provider": "",
-    "documents_analyzed": ${formattedDocuments.length}
+    "documents_analyzed": ${formattedDocuments.length},
+    "total_codes_extracted": 0
   }
 }
 
 IMPORTANT CODING GUIDELINES:
 
-1. **ED/EM Level Selection (99281-99285)**:
+1. **Reason for Admit vs Primary Diagnosis**:
+   - Reason for Admit: Why the patient came in (chief complaint as ICD-10)
+   - Primary Diagnosis: What was found/diagnosed after evaluation
+   - These may be the same or different depending on the case
+
+2. **ED/EM Level Selection (99281-99285)**:
    - 99281: Straightforward MDM, self-limited problem
    - 99282: Low MDM, 2+ self-limited problems or 1 acute uncomplicated
    - 99283: Moderate MDM, 1 acute uncomplicated illness with systemic symptoms
    - 99284: Moderate-High MDM, 1 acute illness with systemic symptoms or 1 acute complicated injury
    - 99285: High MDM, 1+ acute/chronic illness posing threat to life or function
 
-2. **Secondary Diagnoses - Include ALL of these if documented**:
+3. **Secondary Diagnoses - Include ALL of these if documented**:
    - Active conditions being treated
    - Chronic conditions (diabetes, hypertension, COPD, etc.)
    - Family history codes (Z80-Z84)
@@ -351,15 +453,21 @@ IMPORTANT CODING GUIDELINES:
    - Screening encounter codes
    - External cause codes for injuries
 
-3. **Modifiers - Common combinations**:
+4. **Modifiers - Common combinations**:
    - E/M + Procedure: Usually needs modifier 25 on E/M
    - Multiple procedures: May need 59, XE, XS, XP, or XU
    - Screening procedures: PT modifier
    - Bilateral: 50 or RT/LT
 
-4. Extract ALL codes supported by documentation - be thorough!
-5. Every code MUST have evidence with exact_text from the document
-6. Return ONLY valid JSON, no markdown code blocks`;
+5. **Clinical Summary Requirements**:
+   - Be comprehensive - include all documented findings
+   - Organize by clinical relevance
+   - Highlight critical values and abnormal findings
+   - Note any missing documentation
+
+6. Extract ALL codes supported by documentation - be thorough!
+7. Every code MUST have evidence with exact_text from the document
+8. Return ONLY valid JSON, no markdown code blocks`;
   }
 
   /**
@@ -381,7 +489,7 @@ IMPORTANT CODING GUIDELINES:
             content: this.buildUserPrompt(formattedDocuments, chartInfo)
           }
         ],
-        max_tokens: 8000,
+        max_tokens: 12000,
         temperature: 0.1,
         response_format: { type: "json_object" }
       });
@@ -441,6 +549,7 @@ IMPORTANT CODING GUIDELINES:
     const codingCategories = aiResult.coding_categories || {};
 
     // Extract codes arrays from the new structure
+    const reasonForAdmitCodes = codingCategories.reason_for_admit?.codes || [];
     const edEmCodes = codingCategories.ed_em_level?.codes || [];
     const procedureCodes = codingCategories.procedures?.codes || [];
     const primaryDxCodes = codingCategories.primary_diagnosis?.codes || [];
@@ -448,11 +557,12 @@ IMPORTANT CODING GUIDELINES:
     const modifierCodes = codingCategories.modifiers?.codes || [];
 
     return {
-      // AI Summary
+      // AI Summary (enhanced)
       ai_narrative_summary: aiResult.ai_narrative_summary,
 
       // All codes organized by category with the new array structure
       diagnosis_codes: {
+        reason_for_admit: reasonForAdmitCodes,
         ed_em_level: edEmCodes,
         primary_diagnosis: primaryDxCodes,
         secondary_diagnoses: secondaryDxCodes,
@@ -494,11 +604,11 @@ IMPORTANT CODING GUIDELINES:
         messages: [
           {
             role: 'system',
-            content: `You are a clinical documentation specialist. Analyze the given clinical document and provide a structured summary. Return valid JSON only.`
+            content: `You are a clinical documentation specialist. Analyze the given clinical document and provide a comprehensive structured summary. Return valid JSON only.`
           },
           {
             role: 'user',
-            content: `Analyze this clinical document and provide a summary.
+            content: `Analyze this clinical document and provide a detailed summary.
 
 Document Type: ${ocrResult.documentType || 'Unknown'}
 Filename: ${ocrResult.filename}
@@ -517,37 +627,65 @@ Respond with a JSON object:
   "time": "Document time if found",
   "sections": [
     {
-      "section_name": "Chief Complaint",
-      "content": "Summary of section content",
-      "source_line": "Line number where found"
+      "section_name": "Section name (e.g., Chief Complaint, HPI, Physical Exam)",
+      "content": "Detailed summary of section content",
+      "source_line": "Line number where found",
+      "key_data_points": ["Important data points from this section"]
     }
   ],
   "key_findings": [
     {
       "finding": "Important clinical finding",
-      "category": "Category of finding",
+      "category": "vital/lab/imaging/exam/diagnosis/treatment",
+      "significance": "Why this is clinically important",
       "source_section": "Where this was found"
     }
   ],
   "extracted_data": {
-    "chief_complaint": "",
-    "history_of_present_illness": "",
-    "physical_examination": "",
-    "assessment": "",
-    "plan": "",
-    "vitals": {
-      "blood_pressure": "",
-      "heart_rate": "",
-      "respiratory_rate": "",
-      "temperature": "",
-      "oxygen_saturation": ""
-    }
+    "chief_complaint": "Detailed chief complaint",
+    "history_of_present_illness": "Full HPI narrative",
+    "review_of_systems": {
+      "documented_systems": ["List of ROS systems documented"],
+      "positive_findings": ["Positive findings"],
+      "negative_findings": ["Pertinent negatives"]
+    },
+    "past_medical_history": ["List of PMH items"],
+    "medications": ["Current medications"],
+    "allergies": ["Allergies"],
+    "social_history": "Social history summary",
+    "family_history": "Family history summary",
+    "physical_examination": {
+      "general": "General appearance",
+      "vital_signs": {
+        "blood_pressure": "",
+        "heart_rate": "",
+        "respiratory_rate": "",
+        "temperature": "",
+        "oxygen_saturation": "",
+        "pain_score": ""
+      },
+      "system_exams": {
+        "heent": "",
+        "neck": "",
+        "cardiovascular": "",
+        "respiratory": "",
+        "abdomen": "",
+        "extremities": "",
+        "neurological": "",
+        "skin": "",
+        "psychiatric": ""
+      }
+    },
+    "assessment": "Provider's assessment/impression",
+    "plan": "Treatment plan",
+    "disposition": "Discharge, admit, etc."
   },
-  "clinical_relevance": "Brief summary of why this document is important for coding"
+  "clinical_relevance": "Comprehensive summary of why this document is important for coding and what codes it supports",
+  "coding_implications": ["List of potential codes supported by this document"]
 }`
           }
         ],
-        max_tokens: 2000,
+        max_tokens: 4000,
         temperature: 0.1,
         response_format: { type: "json_object" }
       });
