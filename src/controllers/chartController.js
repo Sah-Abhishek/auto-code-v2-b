@@ -1,5 +1,5 @@
 import { ChartRepository } from '../db/chartRepository.js';
-import { calculateSLAHours } from '../utils/slaTracker.js';
+import { calculateSLAHours, calculateProcessingDuration } from '../utils/slaTracker.js';
 
 class ChartController {
 
@@ -33,9 +33,9 @@ class ChartController {
         sortOrder
       });
 
-      // Add SLA info to each chart
+      // Add SLA info to each chart (processing duration: upload → AI completion)
       const chartsWithSLA = result.charts.map(chart => {
-        const slaInfo = calculateSLAHours(chart.processing_completed_at);
+        const slaInfo = calculateProcessingDuration(chart.created_at, chart.processing_completed_at);
 
         return {
           id: chart.id,
@@ -48,7 +48,11 @@ class ChartController {
           aiStatus: chart.ai_status,
           reviewStatus: chart.review_status,
           sla: slaInfo ? {
-            hours: slaInfo.hours,
+            display: slaInfo.display,
+            hours: slaInfo.display, // Keep 'hours' for backward compatibility with frontend
+            isComplete: slaInfo.isComplete,
+            isExcellent: slaInfo.isExcellent,
+            isGood: slaInfo.isGood,
             isWarning: slaInfo.isWarning,
             isCritical: slaInfo.isCritical
           } : null,
@@ -89,7 +93,7 @@ class ChartController {
         });
       }
 
-      const slaInfo = calculateSLAHours(chart.processing_completed_at);
+      const slaInfo = calculateProcessingDuration(chart.created_at, chart.processing_completed_at);
 
       res.json({
         success: true,
