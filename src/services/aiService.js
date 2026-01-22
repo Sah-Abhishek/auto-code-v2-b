@@ -487,7 +487,7 @@ IMPORTANT CODING GUIDELINES:
             content: this.buildUserPrompt(formattedDocuments, chartInfo)
           }
         ],
-        max_tokens: 12000,
+        max_completion_tokens: 12000,
         temperature: 0.1,
         response_format: { type: "json_object" }
       });
