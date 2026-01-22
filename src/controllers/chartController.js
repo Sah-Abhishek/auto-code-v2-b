@@ -1,4 +1,5 @@
-import { ChartRepository } from '../db/chartRepository.js';
+import { ChartRepository, DocumentRepository } from '../db/chartRepository.js';
+import { QueueService } from '../db/queueService.js';
 import { calculateSLAHours, calculateProcessingDuration } from '../utils/slaTracker.js';
 
 class ChartController {
@@ -34,6 +35,7 @@ class ChartController {
       });
 
       // Add SLA info to each chart (processing duration: upload → AI completion)
+      // UPDATED: Now includes error tracking fields
       const chartsWithSLA = result.charts.map(chart => {
         const slaInfo = calculateProcessingDuration(chart.created_at, chart.processing_completed_at);
 
@@ -44,9 +46,15 @@ class ChartController {
           facility: chart.facility,
           specialty: chart.specialty,
           dateOfService: chart.date_of_service,
+          provider: chart.provider,
           documentCount: chart.document_count,
           aiStatus: chart.ai_status,
           reviewStatus: chart.review_status,
+          // NEW: Error tracking fields
+          lastError: chart.last_error,
+          lastErrorAt: chart.last_error_at,
+          retryCount: chart.retry_count,
+          // SLA info
           sla: slaInfo ? {
             display: slaInfo.display,
             hours: slaInfo.display, // Keep 'hours' for backward compatibility with frontend
@@ -129,6 +137,11 @@ class ChartController {
           submittedAt: chart.submitted_at,
           submittedBy: chart.submitted_by,
 
+          // Error tracking (NEW)
+          lastError: chart.last_error,
+          lastErrorAt: chart.last_error_at,
+          retryCount: chart.retry_count,
+
           // SLA
           slaData: chart.sla_data,
           sla: slaInfo,
@@ -168,16 +181,6 @@ class ChartController {
   /**
    * Save user modifications to codes
    * POST /api/charts/:chartNumber/modifications
-   * 
-   * Body: {
-   *   modifications: {
-   *     ed_em_level: [{ action: 'modified', original: {...}, modified: {...}, reason: '...', comment: '...' }],
-   *     procedures: [...],
-   *     primary_diagnosis: [...],
-   *     secondary_diagnoses: [...],
-   *     modifiers: [...]
-   *   }
-   * }
    */
   async saveModifications(req, res) {
     try {
@@ -228,18 +231,6 @@ class ChartController {
   /**
    * Submit final codes to NextCode
    * POST /api/charts/:chartNumber/submit
-   * 
-   * Body: {
-   *   finalCodes: {
-   *     ed_em_level: [...],
-   *     procedures: [...],
-   *     primary_diagnosis: [...],
-   *     secondary_diagnoses: [...],
-   *     modifiers: [...]
-   *   },
-   *   modifications: { ... },  // Full modification history
-   *   submittedBy: 'user@email.com'  // Optional
-   * }
    */
   async submitCodes(req, res) {
     try {
@@ -340,6 +331,91 @@ class ChartController {
   }
 
   /**
+   * Retry a failed chart's processing
+   * POST /api/charts/:chartNumber/retry
+   */
+  async retryChart(req, res) {
+    try {
+      const { chartNumber } = req.params;
+
+      // Get the chart
+      const chart = await ChartRepository.getByChartNumber(chartNumber);
+
+      if (!chart) {
+        return res.status(404).json({
+          success: false,
+          error: 'Chart not found'
+        });
+      }
+
+      // Only allow retry for failed or retry_pending charts
+      if (!['failed', 'retry_pending'].includes(chart.ai_status)) {
+        return res.status(400).json({
+          success: false,
+          error: `Cannot retry chart with status '${chart.ai_status}'. Only failed charts can be retried.`
+        });
+      }
+
+      // Get the documents for this chart
+      const documents = await DocumentRepository.getByChartId(chart.id);
+
+      if (documents.length === 0) {
+        return res.status(400).json({
+          success: false,
+          error: 'No documents found for this chart'
+        });
+      }
+
+      // Reset the chart status
+      await ChartRepository.resetForRetry(chartNumber);
+
+      // Create new job data
+      const jobData = {
+        chartId: chart.id,
+        chartNumber,
+        chartInfo: {
+          mrn: chart.mrn,
+          chartNumber: chart.chart_number,
+          facility: chart.facility,
+          specialty: chart.specialty,
+          dateOfService: chart.date_of_service,
+          provider: chart.provider
+        },
+        documentType: documents[0]?.document_type || 'unknown',
+        documents: documents.map(doc => ({
+          documentId: doc.id,
+          documentType: doc.document_type,
+          originalName: doc.original_name,
+          mimeType: doc.mime_type,
+          fileSize: doc.file_size,
+          s3Key: doc.s3_key,
+          s3Url: doc.s3_url,
+          transactionId: doc.transaction_id
+        }))
+      };
+
+      // Add new job to queue
+      const job = await QueueService.addJob(chart.id, chartNumber, jobData);
+
+      res.json({
+        success: true,
+        message: 'Chart queued for retry',
+        chartNumber,
+        jobId: job.job_id,
+        previousError: chart.last_error,
+        previousAttempts: chart.retry_count
+      });
+
+    } catch (error) {
+      console.error('Retry chart error:', error);
+      res.status(500).json({
+        success: false,
+        error: error.message
+      });
+    }
+  }
+
+  /**
    * Get SLA statistics
    * GET /api/charts/stats/sla
    */
@@ -350,18 +426,20 @@ class ChartController {
       res.json({
         success: true,
         stats: {
-          total: parseInt(stats.total),
-          pendingReview: parseInt(stats.pending_review),
-          processing: parseInt(stats.processing),
-          inReview: parseInt(stats.in_review),
-          submitted: parseInt(stats.submitted),
-          slaWarning: parseInt(stats.sla_warning),
-          slaCritical: parseInt(stats.sla_critical)
+          pendingReview: parseInt(stats.pending_review || 0),
+          queued: parseInt(stats.queued || 0),
+          processing: parseInt(stats.processing || 0),
+          retry_pending: parseInt(stats.retry_pending || 0),
+          failed: parseInt(stats.failed || 0),
+          inReview: parseInt(stats.in_review || 0),
+          submitted: parseInt(stats.submitted || 0),
+          slaWarning: parseInt(stats.sla_warning || 0),
+          slaCritical: parseInt(stats.sla_critical || 0),
+          total: parseInt(stats.total || 0)
         }
       });
-
     } catch (error) {
-      console.error('❌ Error fetching SLA stats:', error);
+      console.error('Get SLA stats error:', error);
       res.status(500).json({
         success: false,
         error: error.message
@@ -445,14 +523,6 @@ class ChartController {
   /**
    * Get comprehensive analytics for dashboard
    * GET /api/charts/analytics/dashboard
-   * 
-   * NEW: AI Accuracy is now calculated at the CODE level:
-   * - Count total AI codes generated (from original_ai_codes)
-   * - Count modified codes (action: 'modified' in user_modifications)
-   * - Count rejected codes (action: 'rejected' in user_modifications)
-   * - AI Accuracy = (totalAICodes - modifiedCodes - rejectedCodes) / totalAICodes * 100
-   * 
-   * Example: AI generated 5 codes, user changed 1 → Accuracy = 80%
    */
   async getDashboardAnalytics(req, res) {
     try {
@@ -469,6 +539,8 @@ class ChartController {
           COUNT(*) FILTER (WHERE review_status = 'in_review') as in_review_charts,
           COUNT(*) FILTER (WHERE ai_status = 'processing') as processing_charts,
           COUNT(*) FILTER (WHERE ai_status = 'queued') as queued_charts,
+          COUNT(*) FILTER (WHERE ai_status = 'failed') as failed_charts,
+          COUNT(*) FILTER (WHERE ai_status = 'retry_pending') as retry_pending_charts,
           COUNT(*) FILTER (WHERE created_at >= NOW() - INTERVAL '${periodDays} days') as charts_in_period
         FROM charts
       `);
@@ -489,9 +561,7 @@ class ChartController {
         AND submitted_at >= NOW() - INTERVAL '${periodDays} days'
       `);
 
-      // ═══════════════════════════════════════════════════════════════
-      // CALCULATE AI ACCURACY AT CODE LEVEL (NEW IMPLEMENTATION)
-      // ═══════════════════════════════════════════════════════════════
+      // Calculate AI accuracy at code level
       const categories = ['ed_em_level', 'procedures', 'primary_diagnosis', 'secondary_diagnoses', 'modifiers'];
 
       let totalAICodes = 0;
@@ -527,7 +597,6 @@ class ChartController {
 
         // Count original AI codes and modifications per category
         for (const category of categories) {
-          // Count original AI codes in this category
           const originalInCategory = Array.isArray(originalCodes[category])
             ? originalCodes[category].length
             : 0;
@@ -535,7 +604,6 @@ class ChartController {
           totalAICodes += originalInCategory;
           chartTotalCodes += originalInCategory;
 
-          // Count modifications in this category
           const categoryMods = Array.isArray(modifications[category])
             ? modifications[category]
             : [];
@@ -555,35 +623,20 @@ class ChartController {
               }
             } else if (mod.action === 'added') {
               addedCodes++;
-              // Added codes don't affect AI accuracy (they're user additions)
             }
           }
         }
 
-        // Update weekly tracking
         weeklyData[weekKey].totalCodes += chartTotalCodes;
         weeklyData[weekKey].unchangedCodes += (chartTotalCodes - chartModified - chartRejected);
       });
 
-      // Calculate unchanged codes
       const unchangedCodes = totalAICodes - modifiedCodes - rejectedCodes;
-
-      // Calculate AI Accuracy: (unchanged / total) * 100
-      const aiAccuracy = totalAICodes > 0
-        ? ((unchangedCodes / totalAICodes) * 100)
-        : 0;
-
-      // Calculate correction rate: (modified + rejected) / total * 100
-      const correctionRate = totalAICodes > 0
-        ? (((modifiedCodes + rejectedCodes) / totalAICodes) * 100)
-        : 0;
-
-      // Total modifications count (for display)
+      const aiAccuracy = totalAICodes > 0 ? ((unchangedCodes / totalAICodes) * 100) : 0;
+      const correctionRate = totalAICodes > 0 ? (((modifiedCodes + rejectedCodes) / totalAICodes) * 100) : 0;
       const totalModifications = modifiedCodes + rejectedCodes;
 
-      // ═══════════════════════════════════════════════════════════════
-      // FORMAT WEEKLY TRENDS (using code-level accuracy)
-      // ═══════════════════════════════════════════════════════════════
+      // Format weekly trends
       const sortedWeeks = Object.keys(weeklyData).filter(k => k !== 'unknown').sort();
       const formattedTrends = sortedWeeks.map((week, idx) => {
         const data = weeklyData[week];
@@ -601,10 +654,6 @@ class ChartController {
           accuracy: parseFloat(weekAccuracy.toFixed(1))
         };
       });
-
-      // ═══════════════════════════════════════════════════════════════
-      // GET OTHER ANALYTICS DATA (existing functionality preserved)
-      // ═══════════════════════════════════════════════════════════════
 
       // Volume by facility
       const volumeByFacility = await query(`
@@ -651,7 +700,7 @@ class ChartController {
         WHERE created_at >= NOW() - INTERVAL '${periodDays} days'
       `);
 
-      // Specialty accuracy (calculated from code-level data)
+      // Specialty accuracy
       const specialtyData = {};
       submittedChartsData.rows.forEach(chart => {
         if (chart.specialty) {
@@ -698,7 +747,7 @@ class ChartController {
       const slaWithin = parseInt(slaCompliance.rows[0]?.within_sla || 0);
       const slaComplianceRate = slaTotal > 0 ? (slaWithin / slaTotal * 100) : 0;
 
-      // Format correction reasons (top 5)
+      // Format correction reasons
       const totalReasonCount = Object.values(reasonCounts).reduce((a, b) => a + b, 0);
       const sortedReasons = Object.entries(reasonCounts)
         .sort((a, b) => b[1] - a[1])
@@ -713,6 +762,7 @@ class ChartController {
       const alerts = [];
       const pendingCharts = parseInt(overallStats.rows[0]?.pending_charts || 0);
       const queuedCharts = parseInt(overallStats.rows[0]?.queued_charts || 0);
+      const failedCharts = parseInt(overallStats.rows[0]?.failed_charts || 0);
 
       if (aiAccuracy < 70 && totalAICodes > 0) {
         alerts.push({
@@ -727,6 +777,14 @@ class ChartController {
           type: 'warning',
           title: 'High Correction Rate',
           message: `${correctionRate.toFixed(1)}% of AI codes required correction`
+        });
+      }
+
+      if (failedCharts > 0) {
+        alerts.push({
+          type: 'error',
+          title: 'Failed Charts',
+          message: `${failedCharts} chart(s) failed processing`
         });
       }
 
@@ -762,28 +820,24 @@ class ChartController {
         });
       }
 
-      // ═══════════════════════════════════════════════════════════════
-      // BUILD RESPONSE
-      // ═══════════════════════════════════════════════════════════════
       res.json({
         success: true,
         analytics: {
           summary: {
-            // NEW: Code-level AI Accuracy
             aiAccuracy: parseFloat(aiAccuracy.toFixed(1)),
-            // Keep aiAcceptanceRate as alias for backward compatibility
             aiAcceptanceRate: parseFloat(aiAccuracy.toFixed(1)),
             overallAccuracy: parseFloat(aiAccuracy.toFixed(1)),
             correctionRate: parseFloat(correctionRate.toFixed(1)),
             chartsProcessed: parseInt(overallStats.rows[0]?.charts_in_period || 0),
             totalSubmitted: submittedChartsData.rows.length,
-            // NEW: Code-level metrics
             totalAICodes,
             unchangedCodes,
             modifiedCodes,
             rejectedCodes,
             addedCodes,
-            totalModifications
+            totalModifications,
+            failedCharts: parseInt(overallStats.rows[0]?.failed_charts || 0),
+            retryPendingCharts: parseInt(overallStats.rows[0]?.retry_pending_charts || 0)
           },
           trends: {
             acceptanceRate: formattedTrends,

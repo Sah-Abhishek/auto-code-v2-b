@@ -9,6 +9,11 @@
  * 3. Downloads files from S3, runs OCR, runs AI analysis
  * 4. Updates the chart with results
  * 5. Marks the job as completed
+ * 
+ * UPDATED: 
+ * - Properly updates chart status on failure (retry_pending vs failed)
+ * - Supports exponential backoff via QueueService
+ * - Better error tracking and logging
  */
 
 import { QueueService } from '../db/queueService.js';
@@ -33,7 +38,9 @@ class DocumentWorker {
    * Start the worker
    */
   async start() {
+    console.log(`\n${'═'.repeat(60)}`);
     console.log(`[WORKER STARTED] ID: ${this.workerId}`);
+    console.log(`${'═'.repeat(60)}\n`);
 
     this.isRunning = true;
 
@@ -42,14 +49,19 @@ class DocumentWorker {
     process.on('SIGINT', () => this.shutdown());
 
     // Release any stuck jobs from crashed workers
-    await QueueService.releaseStuckJobs(30);
+    const stuckJobs = await QueueService.releaseStuckJobs(30);
+    if (stuckJobs.length > 0) {
+      console.log(`🔓 Released ${stuckJobs.length} stuck jobs on startup`);
+    }
 
     // Main processing loop
     while (this.isRunning) {
       try {
         await this.processNextJob();
       } catch (error) {
-        // Worker error - will retry
+        console.error(`[WORKER ERROR] ${error.message}`);
+        // Wait a bit longer on errors
+        await this.sleep(5000);
       }
 
       // Wait before checking for next job
@@ -58,7 +70,9 @@ class DocumentWorker {
       }
     }
 
+    console.log(`\n${'═'.repeat(60)}`);
     console.log('[WORKER STOPPED]');
+    console.log(`${'═'.repeat(60)}\n`);
   }
 
   /**
@@ -76,20 +90,34 @@ class DocumentWorker {
     const sla = createSLATracker();
     sla.markUploadReceived();
 
+    let jobData;
     try {
-      const jobData = typeof job.job_data === 'string' ? JSON.parse(job.job_data) : job.job_data;
-      const { chartId, chartNumber, chartInfo, documents } = jobData;
+      jobData = typeof job.job_data === 'string' ? JSON.parse(job.job_data) : job.job_data;
+    } catch (e) {
+      console.error(`[JOB ERROR] Failed to parse job data for ${job.job_id}`);
+      await this.handleJobFailure(job, 'Invalid job data format');
+      return;
+    }
 
+    const { chartId, chartNumber, chartInfo, documents } = jobData;
+
+    console.log(`\n${'─'.repeat(50)}`);
+    console.log(`[PROCESSING] Chart: ${chartNumber} | Attempt: ${job.attempts}/${job.max_attempts}`);
+    console.log(`${'─'.repeat(50)}`);
+
+    try {
       // Update chart status to processing
       await ChartRepository.updateStatus(chartNumber, 'processing');
 
       // PHASE 1: OCR Processing
       sla.markOCRStarted();
+      console.log(`\n[PHASE 1] OCR Processing - ${documents.length} document(s)`);
 
       const ocrResults = [];
 
       for (let i = 0; i < documents.length; i++) {
         const doc = documents[i];
+        console.log(`  Processing ${i + 1}/${documents.length}: ${doc.originalName}`);
 
         // OCR Processing - download from S3 and process
         const ocrResult = await this.performOCR(doc);
@@ -112,11 +140,7 @@ class DocumentWorker {
             documentType: doc.documentType
           });
 
-          // Log OCR success with results
-          console.log(`\n[OCR SUCCESS] File: ${doc.originalName}`);
-          console.log('[OCR RESULT]', typeof ocrResult.extractedText === 'string'
-            ? ocrResult.extractedText.substring(0, 500) + '...'
-            : JSON.stringify(ocrResult.extractedText).substring(0, 500) + '...');
+          console.log(`  ✓ OCR Success: ${doc.originalName} (${ocrResult.processingTime}ms)`);
         } else {
           // Mark document as failed
           await DocumentRepository.markOCRFailed(doc.documentId, ocrResult.error);
@@ -129,6 +153,8 @@ class DocumentWorker {
             documentType: doc.documentType,
             error: ocrResult.error
           });
+
+          console.log(`  ✗ OCR Failed: ${doc.originalName} - ${ocrResult.error}`);
         }
       }
 
@@ -137,16 +163,17 @@ class DocumentWorker {
       const successfulOCR = ocrResults.filter(r => r.success);
 
       if (successfulOCR.length === 0) {
-        throw new Error('All OCR processing failed');
+        throw new Error('All OCR processing failed - no text extracted from any document');
       }
+
+      console.log(`  OCR Complete: ${successfulOCR.length}/${documents.length} successful`);
 
       // PHASE 2: AI Coding Analysis
       sla.markAIStarted();
+      console.log(`\n[PHASE 2] AI Coding Analysis`);
 
       const formattedDocs = ocrService.formatForAI(ocrResults);
-
-      // Log sending to AI
-      console.log(`\n[SENT TO AI] Chart: ${chartNumber} | Documents: ${formattedDocs.length}`);
+      console.log(`  Sending ${formattedDocs.length} document(s) to AI...`);
 
       const aiResult = await aiService.processForCoding(formattedDocs, chartInfo);
 
@@ -156,43 +183,91 @@ class DocumentWorker {
         throw new Error(`AI processing failed: ${aiResult.error}`);
       }
 
-      // Log AI success with result
-      console.log(`\n[AI SUCCESS] Chart: ${chartNumber}`);
-      console.log('[AI RESULT]', JSON.stringify(aiResult.data, null, 2));
+      console.log(`  ✓ AI Analysis Complete`);
 
       // PHASE 3: Generate Document Summaries
+      console.log(`\n[PHASE 3] Generating Document Summaries`);
+      let summaryCount = 0;
+
       for (const ocrResult of successfulOCR) {
         try {
           const docSummary = await aiService.generateDocumentSummary(ocrResult, chartInfo);
           if (docSummary.success) {
             await DocumentRepository.updateAISummary(ocrResult.documentId, docSummary.data);
+            summaryCount++;
           }
         } catch (error) {
           // Summary generation failed - continue with others
+          console.log(`  ⚠ Summary failed for ${ocrResult.filename}: ${error.message}`);
         }
       }
+
+      console.log(`  Generated ${summaryCount}/${successfulOCR.length} summaries`);
 
       sla.markComplete();
       const slaSummary = sla.getSummary();
 
-      // Update chart with AI results
+      // Update chart with AI results (clears any previous error state)
       await ChartRepository.updateWithAIResults(chartNumber, aiResult.data, slaSummary);
 
       // Mark job as completed
       await QueueService.completeJob(job.job_id);
 
-      console.log(`\n[JOB COMPLETED] Chart: ${chartNumber} | Duration: ${slaSummary.durations.total}`);
+      console.log(`\n${'─'.repeat(50)}`);
+      console.log(`[✓ COMPLETED] Chart: ${chartNumber}`);
+      console.log(`  Duration: ${slaSummary.durations.total} | SLA: ${slaSummary.slaStatus.status}`);
+      console.log(`${'─'.repeat(50)}\n`);
 
     } catch (error) {
-      // Mark job as failed
-      await QueueService.failJob(job.job_id, error.message);
+      console.error(`\n[✗ FAILED] Chart: ${chartNumber}`);
+      console.error(`  Error: ${error.message}`);
 
-      // Update chart status to failed if max attempts reached
-      const jobData = typeof job.job_data === 'string' ? JSON.parse(job.job_data) : job.job_data;
-      if (job.attempts >= job.max_attempts) {
-        await ChartRepository.updateStatus(jobData.chartNumber, 'failed');
+      await this.handleJobFailure(job, error.message, chartNumber);
+    }
+  }
+
+  /**
+   * Handle job failure with proper status updates
+   */
+  async handleJobFailure(job, errorMessage, chartNumber = null) {
+    // Mark job as failed (QueueService handles retry scheduling)
+    const failResult = await QueueService.failJob(job.job_id, errorMessage);
+
+    if (!failResult) {
+      console.error(`  Could not update job status`);
+      return;
+    }
+
+    // Get chartNumber from job if not provided
+    if (!chartNumber) {
+      try {
+        const jobData = typeof job.job_data === 'string' ? JSON.parse(job.job_data) : job.job_data;
+        chartNumber = jobData.chartNumber;
+      } catch (e) {
+        console.error(`  Could not extract chartNumber from job`);
+        return;
       }
     }
+
+    // Update chart status based on whether it will retry
+    if (failResult.isPermanentlyFailed) {
+      // Permanently failed - no more retries
+      await ChartRepository.markFailed(chartNumber, errorMessage);
+      console.log(`  Chart marked as FAILED (max attempts reached)`);
+    } else {
+      // Will retry - set to retry_pending
+      await ChartRepository.updateWithError(
+        chartNumber,
+        errorMessage,
+        true,
+        failResult.attempts
+      );
+
+      const retryInSeconds = Math.round((failResult.retryAfter - new Date()) / 1000);
+      console.log(`  Chart marked as RETRY_PENDING (retry in ${retryInSeconds}s)`);
+    }
+
+    console.log(`${'─'.repeat(50)}\n`);
   }
 
   /**
@@ -260,6 +335,7 @@ class DocumentWorker {
   shutdown() {
     if (this.shutdownRequested) return;
 
+    console.log('\n[SHUTDOWN REQUESTED] Finishing current job...');
     this.shutdownRequested = true;
     this.isRunning = false;
   }

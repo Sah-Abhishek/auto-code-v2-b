@@ -81,6 +81,7 @@ export const ChartRepository = {
 
   /**
    * Update chart with AI results - also saves original_ai_codes for comparison
+   * Clears any previous error state
    */
   async updateWithAIResults(chartNumber, aiResults, slaData) {
     // Store the original AI codes separately for comparison/analytics
@@ -106,6 +107,9 @@ export const ChartRepository = {
         sla_data = $9,
         original_ai_codes = $10,
         processing_completed_at = CURRENT_TIMESTAMP,
+        last_error = NULL,
+        last_error_at = NULL,
+        retry_count = 0,
         updated_at = CURRENT_TIMESTAMP
       WHERE chart_number = $1
       RETURNING *`,
@@ -121,6 +125,46 @@ export const ChartRepository = {
         JSON.stringify(slaData || {}),
         JSON.stringify(originalAICodes)
       ]
+    );
+
+    return result.rows[0];
+  },
+
+  /**
+   * NEW: Update chart with error information when processing fails
+   * Sets appropriate status based on whether it will retry
+   */
+  async updateWithError(chartNumber, errorMessage, willRetry, attemptCount) {
+    const aiStatus = willRetry ? 'retry_pending' : 'failed';
+
+    const result = await query(
+      `UPDATE charts SET
+        ai_status = $2,
+        last_error = $3,
+        last_error_at = CURRENT_TIMESTAMP,
+        retry_count = $4,
+        updated_at = CURRENT_TIMESTAMP
+      WHERE chart_number = $1
+      RETURNING *`,
+      [chartNumber, aiStatus, errorMessage, attemptCount]
+    );
+
+    return result.rows[0];
+  },
+
+  /**
+   * NEW: Mark chart as permanently failed
+   */
+  async markFailed(chartNumber, errorMessage) {
+    const result = await query(
+      `UPDATE charts SET
+        ai_status = 'failed',
+        last_error = $2,
+        last_error_at = CURRENT_TIMESTAMP,
+        updated_at = CURRENT_TIMESTAMP
+      WHERE chart_number = $1
+      RETURNING *`,
+      [chartNumber, errorMessage]
     );
 
     return result.rows[0];
@@ -230,6 +274,7 @@ export const ChartRepository = {
 
   /**
    * Get all charts with filters and pagination
+   * UPDATED: Now includes error info in response
    */
   async getAll(filters = {}) {
     const {
@@ -289,14 +334,20 @@ export const ChartRepository = {
     );
     const total = parseInt(countResult.rows[0].count);
 
-    // Get paginated results
+    // Get paginated results (now includes error fields)
     const offset = (page - 1) * limit;
     const validSortColumns = ['created_at', 'updated_at', 'date_of_service', 'mrn', 'chart_number'];
     const sortColumn = validSortColumns.includes(sortBy) ? sortBy : 'created_at';
     const order = sortOrder.toUpperCase() === 'ASC' ? 'ASC' : 'DESC';
 
     const dataResult = await query(
-      `SELECT * FROM charts ${whereClause} 
+      `SELECT 
+        id, chart_number, mrn, facility, specialty, date_of_service, provider,
+        ai_status, review_status, document_count,
+        last_error, last_error_at, retry_count,
+        processing_started_at, processing_completed_at,
+        created_at, updated_at
+       FROM charts ${whereClause} 
        ORDER BY ${sortColumn} ${order} 
        LIMIT $${paramIndex} OFFSET $${paramIndex + 1}`,
       [...params, limit, offset]
@@ -314,7 +365,7 @@ export const ChartRepository = {
   },
 
   /**
-   * Get SLA statistics - includes 'queued' status
+   * Get SLA statistics - includes 'queued', 'retry_pending', and 'failed' statuses
    */
   async getSLAStats() {
     const result = await query(`
@@ -322,6 +373,8 @@ export const ChartRepository = {
         COUNT(*) FILTER (WHERE ai_status = 'ready' AND review_status = 'pending') as pending_review,
         COUNT(*) FILTER (WHERE ai_status = 'queued') as queued,
         COUNT(*) FILTER (WHERE ai_status = 'processing') as processing,
+        COUNT(*) FILTER (WHERE ai_status = 'retry_pending') as retry_pending,
+        COUNT(*) FILTER (WHERE ai_status = 'failed') as failed,
         COUNT(*) FILTER (WHERE review_status = 'in_review') as in_review,
         COUNT(*) FILTER (WHERE review_status = 'submitted') as submitted,
         COUNT(*) FILTER (
@@ -363,6 +416,7 @@ export const ChartRepository = {
 
   /**
    * Get combined dashboard stats (charts + transactions)
+   * UPDATED: Includes retry_pending and failed counts
    */
   async getDashboardStats() {
     // Get chart stats
@@ -371,6 +425,8 @@ export const ChartRepository = {
         COUNT(*) FILTER (WHERE ai_status = 'ready' AND review_status = 'pending') as pending_review,
         COUNT(*) FILTER (WHERE ai_status = 'queued') as queued,
         COUNT(*) FILTER (WHERE ai_status = 'processing') as processing,
+        COUNT(*) FILTER (WHERE ai_status = 'retry_pending') as retry_pending,
+        COUNT(*) FILTER (WHERE ai_status = 'failed') as failed,
         COUNT(*) FILTER (WHERE review_status = 'in_review') as in_review,
         COUNT(*) FILTER (WHERE review_status = 'submitted') as submitted,
         COUNT(*) as total
@@ -463,6 +519,42 @@ export const ChartRepository = {
       `DELETE FROM charts WHERE chart_number = $1 RETURNING *`,
       [chartNumber]
     );
+    return result.rows[0];
+  },
+
+  /**
+   * NEW: Get failed charts for admin view
+   */
+  async getFailedCharts(limit = 50) {
+    const result = await query(`
+      SELECT 
+        chart_number, mrn, facility, specialty,
+        ai_status, last_error, last_error_at, retry_count,
+        created_at
+      FROM charts
+      WHERE ai_status IN ('failed', 'retry_pending')
+      ORDER BY last_error_at DESC NULLS LAST
+      LIMIT $1
+    `, [limit]);
+
+    return result.rows;
+  },
+
+  /**
+   * NEW: Reset a failed chart to retry processing
+   */
+  async resetForRetry(chartNumber) {
+    const result = await query(`
+      UPDATE charts SET
+        ai_status = 'queued',
+        last_error = NULL,
+        last_error_at = NULL,
+        retry_count = 0,
+        updated_at = CURRENT_TIMESTAMP
+      WHERE chart_number = $1 AND ai_status IN ('failed', 'retry_pending')
+      RETURNING *
+    `, [chartNumber]);
+
     return result.rows[0];
   }
 };

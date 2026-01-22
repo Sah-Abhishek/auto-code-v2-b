@@ -49,7 +49,7 @@ router.get('/debug/:chartNumber', async (req, res) => {
     );
 
     // ═══════════════════════════════════════════════════════════════
-    // Calculate code-level accuracy for this chart (NEW)
+    // Calculate code-level accuracy for this chart
     // ═══════════════════════════════════════════════════════════════
     const originalCodes = chart.original_ai_codes || {};
     const modifications = chart.user_modifications || {};
@@ -112,9 +112,13 @@ router.get('/debug/:chartNumber', async (req, res) => {
         user_modifications: chart.user_modifications,
         final_codes: chart.final_codes,
         submitted_at: chart.submitted_at,
-        submitted_by: chart.submitted_by
+        submitted_by: chart.submitted_by,
+        // NEW: Error tracking fields
+        last_error: chart.last_error,
+        last_error_at: chart.last_error_at,
+        retry_count: chart.retry_count
       },
-      // NEW: Code-level accuracy analysis
+      // Code-level accuracy analysis
       codeAnalysis: {
         totalAICodes,
         unchangedCodes,
@@ -147,6 +151,9 @@ router.post('/:chartNumber/modifications', chartController.saveModifications.bin
 
 // Submit final codes to NextCode
 router.post('/:chartNumber/submit', chartController.submitCodes.bind(chartController));
+
+// NEW: Retry failed chart processing
+router.post('/:chartNumber/retry', chartController.retryChart.bind(chartController));
 
 // Update chart review status
 router.patch('/:chartNumber/status', chartController.updateStatus.bind(chartController));
