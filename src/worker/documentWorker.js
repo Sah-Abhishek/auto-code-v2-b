@@ -4,6 +4,7 @@
  * Run this as a separate process: node workers/documentWorker.js
  * 
  * UPDATED: Added comprehensive logging at every step
+ * UPDATED: Added support for text/plain files - skips OCR and uses content directly
  */
 
 import { QueueService } from '../db/queueService.js';
@@ -132,22 +133,33 @@ class DocumentWorker {
       await ChartRepository.updateStatus(chartNumber, 'processing');
 
       // ═══════════════════════════════════════════════════════════════
-      // PHASE 1: OCR PROCESSING
+      // PHASE 1: OCR PROCESSING (or direct text extraction for text files)
       // ═══════════════════════════════════════════════════════════════
       log.subDivider();
-      log.info('OCR_START', `Starting OCR for ${documents.length} document(s)`);
+      log.info('OCR_START', `Starting text extraction for ${documents.length} document(s)`);
       sla.markOCRStarted();
 
       const ocrResults = [];
       let ocrSuccessCount = 0;
       let ocrFailCount = 0;
+      let textFileCount = 0;
 
       for (let i = 0; i < documents.length; i++) {
         const doc = documents[i];
         log.info('OCR_PROCESS', `Processing document ${i + 1}/${documents.length}: ${doc.originalName}`);
 
         try {
-          const ocrResult = await this.performOCR(doc);
+          let ocrResult;
+
+          // Check if this is a plain text file - skip OCR and read content directly
+          if (doc.mimeType === 'text/plain') {
+            textFileCount++;
+            log.info('TEXT_FILE', `Skipping OCR for text file: ${doc.originalName}`);
+            ocrResult = await this.extractTextFile(doc);
+          } else {
+            // Perform OCR for PDFs and images
+            ocrResult = await this.performOCR(doc);
+          }
 
           if (ocrResult.success) {
             ocrSuccessCount++;
@@ -155,7 +167,8 @@ class DocumentWorker {
               processingTime: `${ocrResult.processingTime}ms`,
               textLength: typeof ocrResult.extractedText === 'string'
                 ? ocrResult.extractedText.length
-                : JSON.stringify(ocrResult.extractedText).length
+                : JSON.stringify(ocrResult.extractedText).length,
+              isTextFile: doc.mimeType === 'text/plain'
             });
 
             // Update document with OCR text
@@ -206,12 +219,12 @@ class DocumentWorker {
       }
 
       sla.markOCRCompleted();
-      log.info('OCR_SUMMARY', `OCR Complete: ${ocrSuccessCount} success, ${ocrFailCount} failed`);
+      log.info('OCR_SUMMARY', `Text Extraction Complete: ${ocrSuccessCount} success, ${ocrFailCount} failed, ${textFileCount} text files (no OCR needed)`);
 
       const successfulOCR = ocrResults.filter(r => r.success);
 
       if (successfulOCR.length === 0) {
-        throw new Error(`All OCR processing failed (${ocrFailCount} documents)`);
+        throw new Error(`All text extraction failed (${ocrFailCount} documents)`);
       }
 
       // ═══════════════════════════════════════════════════════════════
@@ -383,7 +396,57 @@ class DocumentWorker {
   }
 
   /**
-   * Perform OCR on a document
+   * Extract text from a plain text file (no OCR needed)
+   * Downloads from S3 and reads the content directly
+   */
+  async extractTextFile(doc) {
+    const startTime = Date.now();
+
+    try {
+      log.info('TEXT_DOWNLOAD', `Downloading text file from S3: ${doc.s3Url?.substring(0, 80)}...`);
+
+      // Download file from S3
+      const response = await axios.get(doc.s3Url, {
+        responseType: 'text',
+        timeout: 30000
+      });
+
+      const textContent = response.data;
+      const processingTime = Date.now() - startTime;
+
+      log.success('TEXT_EXTRACT', `Text file extracted: ${textContent.length} characters in ${processingTime}ms`);
+
+      // Format text with line numbers for consistency with OCR output
+      const lines = textContent.split('\n');
+      const formattedLines = lines.map((line, index) => ({
+        lineNumber: index + 1,
+        text: line.trim()
+      })).filter(line => line.text.length > 0);
+
+      return {
+        success: true,
+        filename: doc.originalName,
+        documentType: doc.documentType || 'clinical-text',
+        extractedText: formattedLines,
+        rawText: textContent,
+        processingTime,
+        isTextFile: true
+      };
+
+    } catch (error) {
+      log.error('TEXT_ERROR', `Failed to extract text file: ${doc.originalName}`, error);
+      return {
+        success: false,
+        filename: doc.originalName,
+        documentType: doc.documentType,
+        error: error.message,
+        processingTime: Date.now() - startTime
+      };
+    }
+  }
+
+  /**
+   * Perform OCR on a document (PDF or image)
    */
   async performOCR(doc) {
     const startTime = Date.now();

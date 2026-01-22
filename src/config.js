@@ -3,20 +3,16 @@ dotenv.config();
 
 export const config = {
   port: process.env.PORT || 4000,
-
   ocr: {
     serviceUrl: process.env.OCR_SERVICE_URL,
   },
-
   ai: {
     apiKey: process.env.OPENAI_API_KEY,
     model: process.env.OPENAI_MODEL || 'gpt-4o',
   },
-
   database: {
     url: process.env.DATABASE_URL,
   },
-
   s3: {
     endpoint: process.env.S3_ENDPOINT_URL,
     accessKey: process.env.S3_ACCESS_KEY,
@@ -24,7 +20,6 @@ export const config = {
     bucket: process.env.S3_BUCKET_NAME,
     region: process.env.S3_REGION || 'auto'
   },
-
   upload: {
     maxFileSize: parseInt(process.env.MAX_FILE_SIZE) || 25 * 1024 * 1024,
     uploadDir: process.env.UPLOAD_DIR || './uploads',
@@ -33,7 +28,8 @@ export const config = {
       'image/jpeg',
       'image/png',
       'image/tiff',
-      'image/webp'
+      'image/webp',
+      'text/plain'  // Added for clinical text paste functionality
     ]
   }
 };
