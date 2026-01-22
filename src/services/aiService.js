@@ -475,8 +475,6 @@ IMPORTANT CODING GUIDELINES:
    */
   async processForCoding(formattedDocuments, chartInfo) {
     try {
-      console.log(`   🤖 Sending to OpenAI for coding analysis...`);
-
       const response = await this.client.chat.completions.create({
         model: this.model,
         messages: [
@@ -494,8 +492,6 @@ IMPORTANT CODING GUIDELINES:
         response_format: { type: "json_object" }
       });
 
-      console.log(`   ✅ AI analysis completed`);
-
       const textContent = response.choices[0]?.message?.content;
       if (!textContent) {
         throw new Error('No response from AI');
@@ -509,7 +505,6 @@ IMPORTANT CODING GUIDELINES:
         if (jsonMatch) {
           result = JSON.parse(jsonMatch[0]);
         } else {
-          console.error('   ⚠️ Failed to parse AI response');
           result = {
             raw_response: textContent,
             parse_error: parseError.message
@@ -533,8 +528,6 @@ IMPORTANT CODING GUIDELINES:
         data: transformedResult
       };
     } catch (error) {
-      console.error(`   ❌ AI processing failed: ${error.message}`);
-
       return {
         success: false,
         error: error.message
@@ -702,7 +695,6 @@ Respond with a JSON object:
         data: result
       };
     } catch (error) {
-      console.error(`   ⚠️ Document summary failed: ${error.message}`);
       return {
         success: false,
         error: error.message

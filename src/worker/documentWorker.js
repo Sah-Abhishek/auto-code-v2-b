@@ -33,11 +33,7 @@ class DocumentWorker {
    * Start the worker
    */
   async start() {
-    console.log('\n' + '═'.repeat(60));
-    console.log(`🚀 Document Processing Worker Started`);
-    console.log(`   Worker ID: ${this.workerId}`);
-    console.log(`   Poll Interval: ${this.pollInterval}ms`);
-    console.log('═'.repeat(60) + '\n');
+    console.log(`[WORKER STARTED] ID: ${this.workerId}`);
 
     this.isRunning = true;
 
@@ -53,7 +49,7 @@ class DocumentWorker {
       try {
         await this.processNextJob();
       } catch (error) {
-        console.error('❌ Worker error:', error.message);
+        // Worker error - will retry
       }
 
       // Wait before checking for next job
@@ -62,7 +58,7 @@ class DocumentWorker {
       }
     }
 
-    console.log('👋 Worker stopped gracefully');
+    console.log('[WORKER STOPPED]');
   }
 
   /**
@@ -77,11 +73,6 @@ class DocumentWorker {
       return;
     }
 
-    console.log('\n' + '─'.repeat(60));
-    console.log(`📦 Processing Job: ${job.job_id}`);
-    console.log(`   Chart: ${job.chart_number} | Attempt: ${job.attempts}/${job.max_attempts}`);
-    console.log('─'.repeat(60));
-
     const sla = createSLATracker();
     sla.markUploadReceived();
 
@@ -92,17 +83,13 @@ class DocumentWorker {
       // Update chart status to processing
       await ChartRepository.updateStatus(chartNumber, 'processing');
 
-      // ═══════════════════════════════════════════════════════════════
       // PHASE 1: OCR Processing
-      // ═══════════════════════════════════════════════════════════════
-      console.log('\n🔍 PHASE 1: OCR PROCESSING');
       sla.markOCRStarted();
 
       const ocrResults = [];
 
       for (let i = 0; i < documents.length; i++) {
         const doc = documents[i];
-        console.log(`   [${i + 1}/${documents.length}] Processing ${doc.originalName}...`);
 
         // OCR Processing - download from S3 and process
         const ocrResult = await this.performOCR(doc);
@@ -125,10 +112,12 @@ class DocumentWorker {
             documentType: doc.documentType
           });
 
-          console.log(`   ✅ OCR completed: ${doc.originalName} (${ocrResult.processingTime}ms)`);
+          // Log OCR success with results
+          console.log(`\n[OCR SUCCESS] File: ${doc.originalName}`);
+          console.log('[OCR RESULT]', typeof ocrResult.extractedText === 'string'
+            ? ocrResult.extractedText.substring(0, 500) + '...'
+            : JSON.stringify(ocrResult.extractedText).substring(0, 500) + '...');
         } else {
-          console.log(`   ⚠️ OCR failed: ${doc.originalName} - ${ocrResult.error}`);
-
           // Mark document as failed
           await DocumentRepository.markOCRFailed(doc.documentId, ocrResult.error);
 
@@ -146,19 +135,19 @@ class DocumentWorker {
       sla.markOCRCompleted();
 
       const successfulOCR = ocrResults.filter(r => r.success);
-      console.log(`   📊 OCR Complete: ${successfulOCR.length}/${ocrResults.length} files successful`);
 
       if (successfulOCR.length === 0) {
         throw new Error('All OCR processing failed');
       }
 
-      // ═══════════════════════════════════════════════════════════════
       // PHASE 2: AI Coding Analysis
-      // ═══════════════════════════════════════════════════════════════
-      console.log('\n🤖 PHASE 2: AI CODING ANALYSIS');
       sla.markAIStarted();
 
       const formattedDocs = ocrService.formatForAI(ocrResults);
+
+      // Log sending to AI
+      console.log(`\n[SENT TO AI] Chart: ${chartNumber} | Documents: ${formattedDocs.length}`);
+
       const aiResult = await aiService.processForCoding(formattedDocs, chartInfo);
 
       sla.markAICompleted();
@@ -167,22 +156,19 @@ class DocumentWorker {
         throw new Error(`AI processing failed: ${aiResult.error}`);
       }
 
-      console.log(`   ✅ AI analysis complete`);
+      // Log AI success with result
+      console.log(`\n[AI SUCCESS] Chart: ${chartNumber}`);
+      console.log('[AI RESULT]', JSON.stringify(aiResult.data, null, 2));
 
-      // ═══════════════════════════════════════════════════════════════
       // PHASE 3: Generate Document Summaries
-      // ═══════════════════════════════════════════════════════════════
-      console.log('\n📝 PHASE 3: DOCUMENT SUMMARIES');
-
       for (const ocrResult of successfulOCR) {
         try {
           const docSummary = await aiService.generateDocumentSummary(ocrResult, chartInfo);
           if (docSummary.success) {
             await DocumentRepository.updateAISummary(ocrResult.documentId, docSummary.data);
-            console.log(`   ✅ Summary generated: ${ocrResult.filename}`);
           }
         } catch (error) {
-          console.error(`   ⚠️ Summary failed: ${ocrResult.filename} - ${error.message}`);
+          // Summary generation failed - continue with others
         }
       }
 
@@ -195,16 +181,9 @@ class DocumentWorker {
       // Mark job as completed
       await QueueService.completeJob(job.job_id);
 
-      console.log('\n' + '═'.repeat(60));
-      console.log(`✅ JOB COMPLETED: ${job.job_id}`);
-      console.log(`   Chart: ${chartNumber}`);
-      console.log(`   Duration: ${slaSummary.durations.total}`);
-      console.log('═'.repeat(60) + '\n');
+      console.log(`\n[JOB COMPLETED] Chart: ${chartNumber} | Duration: ${slaSummary.durations.total}`);
 
     } catch (error) {
-      console.error(`\n❌ JOB FAILED: ${job.job_id}`);
-      console.error(`   Error: ${error.message}`);
-
       // Mark job as failed
       await QueueService.failJob(job.job_id, error.message);
 
@@ -225,7 +204,6 @@ class DocumentWorker {
 
     try {
       // Download file from S3 to temp location
-      console.log(`      Downloading from S3: ${doc.s3Url}`);
       const response = await axios.get(doc.s3Url, {
         responseType: 'arraybuffer',
         timeout: 60000 // 60 second timeout
@@ -236,8 +214,6 @@ class DocumentWorker {
       const safeFilename = doc.originalName.replace(/[^a-zA-Z0-9._-]/g, '_');
       tempPath = path.join(tempDir, `ocr_${Date.now()}_${safeFilename}`);
       fs.writeFileSync(tempPath, response.data);
-
-      console.log(`      Temp file created: ${tempPath}`);
 
       // Create file object for OCR service
       const tempFile = {
@@ -252,7 +228,6 @@ class DocumentWorker {
       return ocrResult;
 
     } catch (error) {
-      console.error(`      OCR error: ${error.message}`);
       return {
         success: false,
         filename: doc.originalName,
@@ -286,7 +261,6 @@ class DocumentWorker {
     if (this.shutdownRequested) return;
 
     this.shutdownRequested = true;
-    console.log('\n⚠️ Shutdown requested, finishing current job...');
     this.isRunning = false;
   }
 }

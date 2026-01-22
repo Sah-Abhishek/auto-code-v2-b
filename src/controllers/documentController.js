@@ -42,26 +42,13 @@ class DocumentController {
         try {
           transactionMeta = JSON.parse(transactions);
         } catch (e) {
-          console.log('⚠️ Could not parse transaction metadata, using auto-detection');
+          // Use auto-detection if parsing fails
         }
       }
 
-      // Log request
-      console.log('\n' + '═'.repeat(70));
-      console.log('📥 DOCUMENT UPLOAD REQUEST');
-      console.log('═'.repeat(70));
-      console.log(`📋 Document Type: ${documentType || 'Not specified'}`);
-      console.log(`🏥 MRN: ${mrn || 'N/A'} | Chart: ${chartNumber}`);
-      console.log(`🏢 Facility: ${facility || 'N/A'} | Specialty: ${specialty || 'N/A'}`);
-      console.log(`📎 Files: ${files.length}`);
-      console.log(`📦 Transactions: ${transactionMeta.length > 0 ? transactionMeta.length : 'auto-detect'}`);
-      files.forEach((f, i) => console.log(`   ${i + 1}. ${f.originalname} (${(f.size / 1024).toFixed(1)}KB)`));
-      console.log('─'.repeat(70));
-
-      // ═══════════════════════════════════════════════════════════════
-      // STEP 1: Create chart in database with 'queued' status
-      // ═══════════════════════════════════════════════════════════════
-      console.log('\n💾 STEP 1: Creating chart record...');
+      // Log file received
+      console.log(`\n[FILE RECEIVED] Chart: ${chartNumber} | Files: ${files.length}`);
+      files.forEach((f, i) => console.log(`  - ${f.originalname} (${(f.size / 1024).toFixed(1)}KB)`));
 
       const chart = await ChartRepository.createQueued({
         chartNumber,
@@ -73,12 +60,6 @@ class DocumentController {
         documentCount: files.length
       });
 
-      console.log(`   ✅ Chart created: ID ${chart.id} (status: queued)`);
-
-      // ═══════════════════════════════════════════════════════════════
-      // STEP 2: Build transaction map
-      // ═══════════════════════════════════════════════════════════════
-      console.log('\n📦 STEP 2: Building transaction map...');
 
       // Create a map of fileIndex -> transaction info
       const fileTransactionMap = new Map();
@@ -119,24 +100,16 @@ class DocumentController {
       }
 
       const uniqueTransactions = new Set([...fileTransactionMap.values()].map(t => t.transactionId));
-      console.log(`   📊 ${uniqueTransactions.size} transaction(s) detected`);
-
-      // ═══════════════════════════════════════════════════════════════
-      // STEP 3: Upload files to S3 and create document records
-      // ═══════════════════════════════════════════════════════════════
-      console.log('\n☁️  STEP 3: Uploading to S3...');
 
       const documentRecords = [];
 
       for (let i = 0; i < files.length; i++) {
         const file = files[i];
-        console.log(`   [${i + 1}/${files.length}] Uploading ${file.originalname}...`);
 
         // Upload to S3
         const s3Result = await s3Service.uploadFile(file, chartNumber, documentType);
 
         if (!s3Result.success) {
-          console.error(`   ❌ S3 upload failed: ${file.originalname} - ${s3Result.error}`);
           continue;
         }
 
@@ -172,8 +145,6 @@ class DocumentController {
           s3Url: docRecord.s3_url,
           transactionId: docRecord.transaction_id
         });
-
-        console.log(`   ✅ Uploaded: ${file.originalname} (txn: ${txnInfo.transactionId})`);
       }
 
       // Cleanup local temp files (they're in S3 now)
@@ -188,11 +159,6 @@ class DocumentController {
         });
       }
 
-      // ═══════════════════════════════════════════════════════════════
-      // STEP 4: Add job to processing queue
-      // ═══════════════════════════════════════════════════════════════
-      console.log('\n📋 STEP 4: Adding to processing queue...');
-
       const jobData = {
         chartId: chart.id,
         chartNumber,
@@ -202,18 +168,6 @@ class DocumentController {
       };
 
       const job = await QueueService.addJob(chart.id, chartNumber, jobData);
-
-      console.log(`   ✅ Job queued: ${job.job_id}`);
-
-      // ═══════════════════════════════════════════════════════════════
-      // DONE - Return immediately
-      // ═══════════════════════════════════════════════════════════════
-      console.log('\n' + '═'.repeat(70));
-      console.log('📤 UPLOAD COMPLETE - Queued for processing');
-      console.log(`   Chart: ${chartNumber} | Job: ${job.job_id}`);
-      console.log(`   Documents: ${documentRecords.length} uploaded`);
-      console.log(`   Transactions: ${uniqueTransactions.size}`);
-      console.log('═'.repeat(70) + '\n');
 
       // Response - returns immediately, processing happens in background
       res.json({
@@ -238,8 +192,6 @@ class DocumentController {
       });
 
     } catch (error) {
-      console.error('❌ Upload error:', error);
-
       if (req.files) {
         cleanupFiles(req.files);
       }
