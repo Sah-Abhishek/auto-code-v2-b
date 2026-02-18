@@ -23,17 +23,25 @@ After uploading a document via the REST API, you receive a `jobId` in the respon
 { "type": "subscribe", "jobId": "<job-id-from-upload-response>" }
 ```
 
-The server responds with a confirmation:
+The server responds with two messages:
 
+1. **Subscription confirmation:**
 ```json
 { "type": "subscribed", "jobId": "...", "timestamp": "..." }
 ```
 
+2. **Current job status** (fetched from DB immediately, so you know the state even if the job already completed):
+```json
+{ "type": "status_update", "jobId": "...", "status": "completed", "phase": "completed", "message": "Job already completed", "timestamp": "..." }
+```
+
+This means you can subscribe at any time — even after a job finishes — and immediately know its current state.
+
 You can subscribe to multiple jobs on the same connection by sending multiple subscribe messages.
 
-### 3. Receive Status Updates
+### 3. Receive Live Status Updates
 
-The server pushes messages as the job progresses:
+After the initial status, the server pushes messages as the job progresses:
 
 ```json
 {

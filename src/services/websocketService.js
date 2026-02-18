@@ -1,6 +1,7 @@
 import { WebSocketServer } from 'ws';
 import pg from 'pg';
 import { config } from '../config.js';
+import { QueueService } from '../db/queueService.js';
 
 const { Client } = pg;
 
@@ -88,6 +89,9 @@ class WebSocketService {
           timestamp: new Date().toISOString()
         }));
 
+        // Send current job status immediately so client knows where things stand
+        this._sendCurrentStatus(ws, msg.jobId);
+
       } else if (msg.type === 'unsubscribe' && msg.jobId) {
         this._unsubscribeJob(ws, msg.jobId);
 
@@ -102,6 +106,41 @@ class WebSocketService {
         type: 'error',
         message: 'Invalid message format. Expected JSON with { type, jobId }.'
       }));
+    }
+  }
+
+  /**
+   * Fetch current job status from DB and send to client immediately on subscribe
+   */
+  async _sendCurrentStatus(ws, jobId) {
+    try {
+      const job = await QueueService.getJob(jobId);
+      if (!job) {
+        ws.send(JSON.stringify({
+          type: 'status_update',
+          jobId,
+          status: 'not_found',
+          phase: 'not_found',
+          message: 'Job not found',
+          timestamp: new Date().toISOString()
+        }));
+        return;
+      }
+
+      ws.send(JSON.stringify({
+        type: 'status_update',
+        jobId,
+        status: job.status,
+        phase: job.status,
+        message: job.status === 'completed'
+          ? 'Job already completed'
+          : job.status === 'failed'
+            ? `Job failed: ${job.error_message || 'Unknown error'}`
+            : `Job is ${job.status}`,
+        timestamp: new Date().toISOString()
+      }));
+    } catch (err) {
+      console.error('❌ Error fetching current job status:', err.message);
     }
   }
 
