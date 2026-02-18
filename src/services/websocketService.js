@@ -17,8 +17,8 @@ class WebSocketService {
    * and start listening for PostgreSQL NOTIFY events
    */
   async init(server) {
-    // Create WebSocket server on /ws path
-    this.wss = new WebSocketServer({ server, path: '/ws' });
+    // Create WebSocket server on /api/ws path (so Nginx's /api proxy handles it)
+    this.wss = new WebSocketServer({ server, path: '/api/ws' });
 
     this.wss.on('connection', (ws) => {
       console.log('🔌 WebSocket client connected');
@@ -64,7 +64,7 @@ class WebSocketService {
     // Start listening to PostgreSQL notifications
     await this._startPGListener();
 
-    console.log('📡 WebSocket server ready on /ws');
+    console.log('📡 WebSocket server ready on /api/ws');
   }
 
   /**

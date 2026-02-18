@@ -7,13 +7,13 @@ The backend provides real-time job status updates via WebSocket. When a document
 ## Connection Details
 
 - **REST API base:** `http://ai.safentro.com/api`
-- **WebSocket endpoint:** `ws://ai.safentro.com/ws`
+- **WebSocket endpoint:** `ws://ai.safentro.com/api/ws`
 
 ## Protocol
 
 ### 1. Connect
 
-Open a WebSocket connection to `ws://ai.safentro.com/ws`.
+Open a WebSocket connection to `ws://ai.safentro.com/api/ws`.
 
 ### 2. Subscribe to a Job
 
@@ -77,7 +77,7 @@ If the job fails:
 ```javascript
 import { useEffect, useRef, useState, useCallback } from 'react';
 
-const WS_URL = 'ws://ai.safentro.com/ws';
+const WS_URL = 'ws://ai.safentro.com/api/ws';
 
 export function useJobStatus(jobId) {
   const [status, setStatus] = useState(null);
@@ -186,7 +186,7 @@ function connectWithRetry(jobId, onUpdate, maxRetries = 5) {
 
 1. User uploads documents via `POST http://ai.safentro.com/api/documents/upload`
 2. Response includes a `jobId`
-3. Open WebSocket to `ws://ai.safentro.com/ws`
+3. Open WebSocket to `ws://ai.safentro.com/api/ws`
 4. Send `{ "type": "subscribe", "jobId": "<jobId>" }`
 5. Render a progress indicator that updates on each `status_update` message
 6. When `status === 'completed'`, fetch final results via `GET http://ai.safentro.com/api/documents/status/<chartNumber>`

@@ -60,7 +60,7 @@ async function startServer() {
       // Initialize WebSocket
       try {
         await websocketService.init(server);
-        console.log(`🔌 WebSocket: ws://localhost:${config.port}/ws`);
+        console.log(`🔌 WebSocket: ws://localhost:${config.port}/api/ws`);
       } catch (err) {
         console.error('❌ WebSocket init failed:', err.message);
       }
