@@ -33,11 +33,9 @@ app.get('/', (req, res) => {
 // Error handling
 app.use((error, req, res, next) => {
   console.error('❌ Error:', error.message);
-
   if (error.code === 'LIMIT_FILE_SIZE') {
     return res.status(400).json({ success: false, error: 'File too large (max 25MB)' });
   }
-
   res.status(500).json({ success: false, error: error.message });
 });
 

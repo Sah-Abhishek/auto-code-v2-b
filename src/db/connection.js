@@ -3,10 +3,12 @@ import { config } from '../config.js';
 
 const { Pool } = pg;
 
+// Disable TLS certificate validation for Neon
+process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
+
 // Create connection pool
 export const pool = new Pool({
-  connectionString: config.database.url,
-  ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false
+  connectionString: config.database.url
 });
 
 // Test connection

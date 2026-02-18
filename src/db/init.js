@@ -1,128 +1,263 @@
-import { pool } from './connection.js';
+import pg from 'pg';
+import dotenv from 'dotenv';
+import bcrypt from 'bcrypt';
 
-const createTablesSQL = `
--- Charts table - stores chart information and AI results
-CREATE TABLE IF NOT EXISTS charts (
-  id SERIAL PRIMARY KEY,
-  chart_number VARCHAR(50) UNIQUE NOT NULL,
-  mrn VARCHAR(50) NOT NULL,
-  facility VARCHAR(255),
-  specialty VARCHAR(100),
-  date_of_service DATE,
-  provider VARCHAR(255),
-  
-  -- Processing status
-  ai_status VARCHAR(50) DEFAULT 'queued',
-  review_status VARCHAR(50) DEFAULT 'pending',
-  
-  -- Document tracking
-  document_count INTEGER DEFAULT 0,
-  
-  -- AI Results (stored as JSONB)
-  ai_summary JSONB,
-  diagnosis_codes JSONB,
-  procedures JSONB,
-  medications JSONB,
-  vitals_summary JSONB,
-  lab_results_summary JSONB,
-  coding_notes JSONB,
-  
-  -- SLA tracking
-  sla_data JSONB,
-  processing_started_at TIMESTAMP,
-  processing_completed_at TIMESTAMP,
-  
-  -- Timestamps
-  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
+dotenv.config();
 
--- Documents table - stores individual documents for each chart with S3 URLs
-CREATE TABLE IF NOT EXISTS documents (
-  id SERIAL PRIMARY KEY,
-  chart_id INTEGER REFERENCES charts(id) ON DELETE CASCADE,
-  document_type VARCHAR(100),
-  filename VARCHAR(255) NOT NULL,
-  original_name VARCHAR(255),
-  file_size INTEGER,
-  mime_type VARCHAR(100),
-  
-  -- S3 Storage
-  s3_key VARCHAR(500),
-  s3_url VARCHAR(1000),
-  s3_bucket VARCHAR(255),
-  
-  -- OCR results
-  ocr_text TEXT,
-  ocr_status VARCHAR(50) DEFAULT 'pending',
-  ocr_processing_time INTEGER,
-  ocr_completed_at TIMESTAMP,
-  
-  -- AI Document Summary
-  ai_document_summary JSONB,
-  
-  -- Timestamps
-  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
+// Disable SSL certificate verification for Neon/cloud DBs
+process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
 
--- Create indexes for better query performance
-CREATE INDEX IF NOT EXISTS idx_charts_chart_number ON charts(chart_number);
-CREATE INDEX IF NOT EXISTS idx_charts_mrn ON charts(mrn);
-CREATE INDEX IF NOT EXISTS idx_charts_ai_status ON charts(ai_status);
-CREATE INDEX IF NOT EXISTS idx_charts_review_status ON charts(review_status);
-CREATE INDEX IF NOT EXISTS idx_charts_facility ON charts(facility);
-CREATE INDEX IF NOT EXISTS idx_charts_specialty ON charts(specialty);
-CREATE INDEX IF NOT EXISTS idx_charts_created_at ON charts(created_at DESC);
-CREATE INDEX IF NOT EXISTS idx_documents_chart_id ON documents(chart_id);
-CREATE INDEX IF NOT EXISTS idx_documents_document_type ON documents(document_type);
+const pool = new pg.Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: { rejectUnauthorized: false }
+});
 
--- Function to update updated_at timestamp
-CREATE OR REPLACE FUNCTION update_updated_at_column()
-RETURNS TRIGGER AS $$
-BEGIN
-  NEW.updated_at = CURRENT_TIMESTAMP;
-  RETURN NEW;
-END;
-$$ language 'plpgsql';
-
--- Trigger to auto-update updated_at
-DROP TRIGGER IF EXISTS update_charts_updated_at ON charts;
-CREATE TRIGGER update_charts_updated_at
-  BEFORE UPDATE ON charts
-  FOR EACH ROW
-  EXECUTE FUNCTION update_updated_at_column();
-`;
-
-async function initializeDatabase() {
-  console.log('🔧 Initializing database...');
+async function initDatabase() {
+  const client = await pool.connect();
 
   try {
-    await pool.query(createTablesSQL);
-    console.log('✅ Database tables created successfully');
+    console.log('🚀 Starting database initialization...\n');
 
-    // Check tables
-    const result = await pool.query(`
+    // ═══════════════════════════════════════════════════════════════
+    // DROP EXISTING TABLES (clean start)
+    // ═══════════════════════════════════════════════════════════════
+    console.log('🗑️  Dropping existing tables (if any)...');
+    await client.query(`DROP TABLE IF EXISTS processing_queue CASCADE`);
+    await client.query(`DROP TABLE IF EXISTS documents CASCADE`);
+    await client.query(`DROP TABLE IF EXISTS charts CASCADE`);
+    await client.query(`DROP TABLE IF EXISTS users CASCADE`);
+    console.log('   ✅ Old tables dropped\n');
+
+    // ═══════════════════════════════════════════════════════════════
+    // CHARTS TABLE
+    // ═══════════════════════════════════════════════════════════════
+    console.log('📋 Creating charts table...');
+    await client.query(`
+      CREATE TABLE charts (
+        id SERIAL PRIMARY KEY,
+        chart_number VARCHAR(100) UNIQUE NOT NULL,
+        mrn VARCHAR(100),
+        facility VARCHAR(255),
+        specialty VARCHAR(255),
+        date_of_service DATE,
+        provider VARCHAR(255),
+        document_count INTEGER DEFAULT 0,
+        
+        -- AI Processing Status
+        ai_status VARCHAR(50) DEFAULT 'queued',
+        review_status VARCHAR(50) DEFAULT 'pending',
+        
+        -- AI Results (JSON fields)
+        ai_summary JSONB,
+        diagnosis_codes JSONB,
+        procedures JSONB,
+        medications JSONB,
+        vitals_summary JSONB,
+        lab_results_summary JSONB,
+        coding_notes JSONB,
+        sla_data JSONB,
+        
+        -- Original AI codes for comparison
+        original_ai_codes JSONB,
+        
+        -- User modifications
+        user_modifications JSONB,
+        
+        -- Final submitted codes
+        final_codes JSONB,
+        submitted_at TIMESTAMP,
+        submitted_by VARCHAR(100),
+        
+        -- Error tracking
+        last_error TEXT,
+        last_error_at TIMESTAMP,
+        retry_count INTEGER DEFAULT 0,
+        
+        -- Processing timestamps
+        processing_started_at TIMESTAMP,
+        processing_completed_at TIMESTAMP,
+        
+        -- Record timestamps
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+    console.log('   ✅ charts table created\n');
+
+    // ═══════════════════════════════════════════════════════════════
+    // DOCUMENTS TABLE
+    // ═══════════════════════════════════════════════════════════════
+    console.log('📄 Creating documents table...');
+    await client.query(`
+      CREATE TABLE documents (
+        id SERIAL PRIMARY KEY,
+        chart_id INTEGER REFERENCES charts(id) ON DELETE CASCADE,
+        document_type VARCHAR(100),
+        filename VARCHAR(255),
+        original_name VARCHAR(255),
+        file_size INTEGER,
+        mime_type VARCHAR(100),
+        
+        -- S3 Storage
+        s3_key VARCHAR(500),
+        s3_url TEXT,
+        s3_bucket VARCHAR(255),
+        
+        -- OCR Processing
+        ocr_status VARCHAR(50) DEFAULT 'pending',
+        ocr_text TEXT,
+        ocr_processing_time INTEGER,
+        ocr_completed_at TIMESTAMP,
+        
+        -- AI Document Summary
+        ai_document_summary JSONB,
+        
+        -- Transaction tracking
+        transaction_id VARCHAR(100),
+        transaction_label VARCHAR(255),
+        is_group_member BOOLEAN DEFAULT FALSE,
+        
+        -- Timestamps
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+    console.log('   ✅ documents table created\n');
+
+    // ═══════════════════════════════════════════════════════════════
+    // PROCESSING QUEUE TABLE
+    // ═══════════════════════════════════════════════════════════════
+    console.log('⏳ Creating processing_queue table...');
+    await client.query(`
+      CREATE TABLE processing_queue (
+        id SERIAL PRIMARY KEY,
+        job_id VARCHAR(100) UNIQUE NOT NULL,
+        chart_id INTEGER REFERENCES charts(id) ON DELETE CASCADE,
+        chart_number VARCHAR(100),
+        
+        -- Job status
+        status VARCHAR(50) DEFAULT 'pending',
+        job_data JSONB,
+        
+        -- Worker tracking
+        worker_id VARCHAR(100),
+        locked_at TIMESTAMP,
+        
+        -- Timing
+        started_at TIMESTAMP,
+        completed_at TIMESTAMP,
+        
+        -- Retry logic
+        attempts INTEGER DEFAULT 0,
+        max_attempts INTEGER DEFAULT 3,
+        error_message TEXT,
+        retry_after TIMESTAMP,
+        
+        -- Timestamps
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+    console.log('   ✅ processing_queue table created\n');
+
+    // ═══════════════════════════════════════════════════════════════
+    // USERS TABLE
+    // ═══════════════════════════════════════════════════════════════
+    console.log('👤 Creating users table...');
+    await client.query(`
+      CREATE TABLE users (
+        id SERIAL PRIMARY KEY,
+        user_id VARCHAR(100) UNIQUE NOT NULL,
+        password_hash VARCHAR(255) NOT NULL,
+        name VARCHAR(255) NOT NULL,
+        role VARCHAR(50) DEFAULT 'coder',
+        email VARCHAR(255),
+        is_active BOOLEAN DEFAULT TRUE,
+        last_login TIMESTAMP,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+    console.log('   ✅ users table created\n');
+
+    // ═══════════════════════════════════════════════════════════════
+    // INDEXES
+    // ═══════════════════════════════════════════════════════════════
+    console.log('🔍 Creating indexes...');
+
+    // Charts indexes
+    await client.query(`CREATE INDEX idx_charts_ai_status ON charts(ai_status)`);
+    await client.query(`CREATE INDEX idx_charts_review_status ON charts(review_status)`);
+    await client.query(`CREATE INDEX idx_charts_facility ON charts(facility)`);
+    await client.query(`CREATE INDEX idx_charts_specialty ON charts(specialty)`);
+    await client.query(`CREATE INDEX idx_charts_mrn ON charts(mrn)`);
+    await client.query(`CREATE INDEX idx_charts_created_at ON charts(created_at DESC)`);
+    await client.query(`CREATE INDEX idx_charts_date_of_service ON charts(date_of_service)`);
+
+    // Documents indexes
+    await client.query(`CREATE INDEX idx_documents_chart_id ON documents(chart_id)`);
+    await client.query(`CREATE INDEX idx_documents_transaction_id ON documents(transaction_id)`);
+    await client.query(`CREATE INDEX idx_documents_ocr_status ON documents(ocr_status)`);
+
+    // Processing queue indexes
+    await client.query(`CREATE INDEX idx_queue_status ON processing_queue(status)`);
+    await client.query(`CREATE INDEX idx_queue_chart_number ON processing_queue(chart_number)`);
+    await client.query(`CREATE INDEX idx_queue_created_at ON processing_queue(created_at)`);
+    await client.query(`CREATE INDEX idx_queue_retry_after ON processing_queue(retry_after)`);
+
+    // Users indexes
+    await client.query(`CREATE INDEX idx_users_role ON users(role)`);
+    await client.query(`CREATE INDEX idx_users_is_active ON users(is_active)`);
+
+    console.log('   ✅ All indexes created\n');
+
+    // ═══════════════════════════════════════════════════════════════
+    // DEFAULT ADMIN USER
+    // ═══════════════════════════════════════════════════════════════
+    console.log('👤 Creating default admin user...');
+
+    const defaultPassword = 'admin123';
+    const passwordHash = await bcrypt.hash(defaultPassword, 10);
+
+    await client.query(
+      `INSERT INTO users (user_id, password_hash, name, role, email)
+       VALUES ('admin', $1, 'System Administrator', 'admin', 'admin@medcode.ai')`,
+      [passwordHash]
+    );
+    console.log('   ✅ Default admin user created');
+    console.log('   📝 Username: admin');
+    console.log('   📝 Password: admin123');
+    console.log('   ⚠️  Please change the password after first login!\n');
+
+    // ═══════════════════════════════════════════════════════════════
+    // VERIFY TABLES
+    // ═══════════════════════════════════════════════════════════════
+    console.log('🔍 Verifying tables...');
+
+    const tables = await client.query(`
       SELECT table_name 
       FROM information_schema.tables 
-      WHERE table_schema = 'public'
+      WHERE table_schema = 'public' 
+      AND table_type = 'BASE TABLE'
+      ORDER BY table_name
     `);
-    console.log('📋 Tables:', result.rows.map(r => r.table_name).join(', '));
+
+    console.log('   Tables in database:');
+    tables.rows.forEach(row => {
+      console.log(`   - ${row.table_name}`);
+    });
+
+    console.log('\n' + '═'.repeat(50));
+    console.log('✅ Database initialization completed successfully!');
+    console.log('═'.repeat(50) + '\n');
 
   } catch (error) {
     console.error('❌ Database initialization failed:', error.message);
-    throw error;
+    console.error(error);
+    process.exit(1);
   } finally {
+    client.release();
     await pool.end();
   }
 }
 
-// Run if called directly
-initializeDatabase()
-  .then(() => {
-    console.log('✅ Database initialization complete');
-    process.exit(0);
-  })
-  .catch((err) => {
-    console.error('❌ Failed:', err);
-    process.exit(1);
-  });
+// Run initialization
+initDatabase();
