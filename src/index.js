@@ -3,6 +3,7 @@ import cors from 'cors';
 import { config } from './config.js';
 import routes from './routes/index.js';
 import { pool } from './db/connection.js';
+import { websocketService } from './services/websocketService.js';
 
 const app = express();
 
@@ -47,8 +48,8 @@ async function startServer() {
     await pool.query('SELECT NOW()');
     console.log('✅ Database connected');
 
-    // Start server
-    app.listen(config.port, () => {
+    // Start server and capture HTTP server instance for WebSocket
+    const server = app.listen(config.port, async () => {
       console.log('\n' + '═'.repeat(50));
       console.log('🏥 MedCode AI Backend');
       console.log('═'.repeat(50));
@@ -57,6 +58,15 @@ async function startServer() {
       console.log(`🔗 OCR: ${config.ocr.serviceUrl}`);
       console.log(`🤖 AI Model: ${config.ai.model}`);
       console.log(`📦 Database: Connected`);
+
+      // Initialize WebSocket
+      try {
+        await websocketService.init(server);
+        console.log(`🔌 WebSocket: ws://localhost:${config.port}/ws`);
+      } catch (err) {
+        console.error('❌ WebSocket init failed:', err.message);
+      }
+
       console.log('═'.repeat(50) + '\n');
     });
   } catch (error) {

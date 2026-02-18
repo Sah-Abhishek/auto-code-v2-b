@@ -335,6 +335,22 @@ export const QueueService = {
   },
 
   /**
+   * Send a PostgreSQL NOTIFY with job status update
+   * Used by the worker to broadcast status changes to WebSocket clients via PG LISTEN/NOTIFY
+   */
+  async notifyStatusChange(jobId, status, phase, message = null) {
+    const payload = JSON.stringify({
+      jobId,
+      status,
+      phase,
+      message,
+      timestamp: new Date().toISOString()
+    });
+
+    await query(`SELECT pg_notify('job_status_update', $1)`, [payload]);
+  },
+
+  /**
    * Get count of jobs waiting for retry
    */
   async getRetryingCount() {

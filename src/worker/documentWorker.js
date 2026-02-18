@@ -5,6 +5,7 @@
  * 
  * UPDATED: Added comprehensive logging at every step
  * UPDATED: Added support for text/plain files - skips OCR and uses content directly
+ * UPDATED: Added support for Word documents (.doc, .docx) - extracts text using mammoth
  */
 
 import { QueueService } from '../db/queueService.js';
@@ -16,6 +17,7 @@ import fs from 'fs';
 import path from 'path';
 import os from 'os';
 import axios from 'axios';
+import mammoth from 'mammoth';
 
 // ═══════════════════════════════════════════════════════════════
 // LOGGING UTILITY
@@ -51,6 +53,12 @@ const log = {
     console.log('─'.repeat(50));
   }
 };
+
+// Word document MIME types
+const WORD_MIME_TYPES = [
+  'application/msword',
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+];
 
 class DocumentWorker {
   constructor() {
@@ -131,18 +139,21 @@ class DocumentWorker {
       // Update chart status to processing
       log.info('STATUS', `Setting chart ${chartNumber} to 'processing'`);
       await ChartRepository.updateStatus(chartNumber, 'processing');
+      await QueueService.notifyStatusChange(job.job_id, 'processing', 'processing', `Processing chart ${chartNumber}`);
 
       // ═══════════════════════════════════════════════════════════════
-      // PHASE 1: OCR PROCESSING (or direct text extraction for text files)
+      // PHASE 1: TEXT EXTRACTION (OCR for PDFs/images, direct for text/Word)
       // ═══════════════════════════════════════════════════════════════
       log.subDivider();
       log.info('OCR_START', `Starting text extraction for ${documents.length} document(s)`);
       sla.markOCRStarted();
+      await QueueService.notifyStatusChange(job.job_id, 'processing', 'ocr_started', `Starting text extraction for ${documents.length} document(s)`);
 
       const ocrResults = [];
       let ocrSuccessCount = 0;
       let ocrFailCount = 0;
       let textFileCount = 0;
+      let wordFileCount = 0;
 
       for (let i = 0; i < documents.length; i++) {
         const doc = documents[i];
@@ -156,8 +167,15 @@ class DocumentWorker {
             textFileCount++;
             log.info('TEXT_FILE', `Skipping OCR for text file: ${doc.originalName}`);
             ocrResult = await this.extractTextFile(doc);
-          } else {
-            // Perform OCR for PDFs and images
+          }
+          // Check if this is a Word document - extract text using mammoth
+          else if (WORD_MIME_TYPES.includes(doc.mimeType)) {
+            wordFileCount++;
+            log.info('WORD_FILE', `Extracting text from Word document: ${doc.originalName}`);
+            ocrResult = await this.extractWordDocument(doc);
+          }
+          // Perform OCR for PDFs and images
+          else {
             ocrResult = await this.performOCR(doc);
           }
 
@@ -168,7 +186,8 @@ class DocumentWorker {
               textLength: typeof ocrResult.extractedText === 'string'
                 ? ocrResult.extractedText.length
                 : JSON.stringify(ocrResult.extractedText).length,
-              isTextFile: doc.mimeType === 'text/plain'
+              isTextFile: doc.mimeType === 'text/plain',
+              isWordFile: WORD_MIME_TYPES.includes(doc.mimeType)
             });
 
             // Update document with OCR text
@@ -219,7 +238,8 @@ class DocumentWorker {
       }
 
       sla.markOCRCompleted();
-      log.info('OCR_SUMMARY', `Text Extraction Complete: ${ocrSuccessCount} success, ${ocrFailCount} failed, ${textFileCount} text files (no OCR needed)`);
+      log.info('OCR_SUMMARY', `Text Extraction Complete: ${ocrSuccessCount} success, ${ocrFailCount} failed, ${textFileCount} text files, ${wordFileCount} Word files (no OCR needed)`);
+      await QueueService.notifyStatusChange(job.job_id, 'processing', 'ocr_completed', `Text extraction complete: ${ocrSuccessCount} success, ${ocrFailCount} failed`);
 
       const successfulOCR = ocrResults.filter(r => r.success);
 
@@ -234,6 +254,7 @@ class DocumentWorker {
       log.info('AI_START', `Starting AI analysis for chart ${chartNumber}`);
       log.info('AI_START', `Documents for AI: ${successfulOCR.length}`);
       sla.markAIStarted();
+      await QueueService.notifyStatusChange(job.job_id, 'processing', 'ai_started', `Starting AI analysis with ${successfulOCR.length} document(s)`);
 
       let aiResult;
       try {
@@ -284,6 +305,7 @@ class DocumentWorker {
       }
 
       sla.markAICompleted();
+      await QueueService.notifyStatusChange(job.job_id, 'processing', 'ai_completed', 'AI analysis complete');
 
       // ═══════════════════════════════════════════════════════════════
       // PHASE 3: DOCUMENT SUMMARIES (Optional - don't fail if this fails)
@@ -311,6 +333,7 @@ class DocumentWorker {
       // ═══════════════════════════════════════════════════════════════
       log.subDivider();
       log.info('SAVE_START', `Saving AI results to database`);
+      await QueueService.notifyStatusChange(job.job_id, 'processing', 'saving_results', 'Saving results to database');
 
       sla.markComplete();
       const slaSummary = sla.getSummary();
@@ -325,6 +348,7 @@ class DocumentWorker {
 
       // Mark job as completed
       await QueueService.completeJob(job.job_id);
+      await QueueService.notifyStatusChange(job.job_id, 'completed', 'completed', `Chart ${chartNumber} processed successfully`);
 
       log.divider();
       log.success('JOB_COMPLETE', `Chart ${chartNumber} processed successfully`, {
@@ -363,6 +387,15 @@ class DocumentWorker {
         willRetry: failResult.willRetry,
         retryAfter: failResult.retryAfter
       });
+
+      await QueueService.notifyStatusChange(
+        job.job_id,
+        'failed',
+        'failed',
+        failResult.willRetry
+          ? `Failed (attempt ${failResult.attempts}/${failResult.max_attempts}), will retry`
+          : `Permanently failed: ${errorMessage}`
+      );
 
       // Get chartNumber from job if not provided
       if (!chartNumber || chartNumber === 'unknown') {
@@ -442,6 +475,87 @@ class DocumentWorker {
         error: error.message,
         processingTime: Date.now() - startTime
       };
+    }
+  }
+
+  /**
+   * Extract text from a Word document (.doc, .docx)
+   * Downloads from S3 and extracts text using mammoth
+   */
+  async extractWordDocument(doc) {
+    const startTime = Date.now();
+    let tempPath = null;
+
+    try {
+      log.info('WORD_DOWNLOAD', `Downloading Word document from S3: ${doc.s3Url?.substring(0, 80)}...`);
+
+      // Download file from S3
+      const response = await axios.get(doc.s3Url, {
+        responseType: 'arraybuffer',
+        timeout: 60000
+      });
+
+      log.info('WORD_DOWNLOAD', `Downloaded ${(response.data.length / 1024).toFixed(1)}KB`);
+
+      // Create temp file for mammoth
+      const tempDir = os.tmpdir();
+      const safeFilename = doc.originalName.replace(/[^a-zA-Z0-9._-]/g, '_');
+      tempPath = path.join(tempDir, `word_${Date.now()}_${safeFilename}`);
+      fs.writeFileSync(tempPath, Buffer.from(response.data));
+
+      log.info('WORD_EXTRACT', `Extracting text from Word document...`);
+
+      // Extract text using mammoth
+      const result = await mammoth.extractRawText({ path: tempPath });
+      const textContent = result.value;
+      const processingTime = Date.now() - startTime;
+
+      // Log any warnings from mammoth
+      if (result.messages && result.messages.length > 0) {
+        result.messages.forEach(msg => {
+          if (msg.type === 'warning') {
+            log.warn('WORD_EXTRACT', `Mammoth warning: ${msg.message}`);
+          }
+        });
+      }
+
+      log.success('WORD_EXTRACT', `Word document extracted: ${textContent.length} characters in ${processingTime}ms`);
+
+      // Format text with line numbers for consistency with OCR output
+      const lines = textContent.split('\n');
+      const formattedLines = lines.map((line, index) => ({
+        lineNumber: index + 1,
+        text: line.trim()
+      })).filter(line => line.text.length > 0);
+
+      return {
+        success: true,
+        filename: doc.originalName,
+        documentType: doc.documentType || 'word-document',
+        extractedText: formattedLines,
+        rawText: textContent,
+        processingTime,
+        isWordFile: true
+      };
+
+    } catch (error) {
+      log.error('WORD_ERROR', `Failed to extract Word document: ${doc.originalName}`, error);
+      return {
+        success: false,
+        filename: doc.originalName,
+        documentType: doc.documentType,
+        error: error.message,
+        processingTime: Date.now() - startTime
+      };
+    } finally {
+      // Clean up temp file
+      if (tempPath) {
+        try {
+          fs.unlinkSync(tempPath);
+        } catch (e) {
+          // Ignore cleanup errors
+        }
+      }
     }
   }
 

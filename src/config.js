@@ -29,7 +29,9 @@ export const config = {
       'image/png',
       'image/tiff',
       'image/webp',
-      'text/plain'  // Added for clinical text paste functionality
+      'text/plain',  // Added for clinical text paste functionality
+      'application/msword',                                                          // .doc files
+      'application/vnd.openxmlformats-officedocument.wordprocessingml.document'     // .docx files
     ]
   }
 };
