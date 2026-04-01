@@ -28,7 +28,7 @@ router.get('/debug/:chartNumber', async (req, res) => {
 
     // Get chart
     const chartResult = await query(
-      'SELECT * FROM charts WHERE chart_number = $1',
+      'SELECT * FROM mc_charts WHERE chart_number = $1',
       [chartNumber]
     );
 
@@ -44,7 +44,7 @@ router.get('/debug/:chartNumber', async (req, res) => {
               s3_key, s3_url, s3_bucket, ocr_status, ocr_processing_time, 
               LENGTH(ocr_text) as ocr_text_length,
               SUBSTRING(ocr_text, 1, 200) as ocr_text_preview
-       FROM documents WHERE chart_id = $1`,
+       FROM mc_documents WHERE chart_id = $1`,
       [chart.id]
     );
 

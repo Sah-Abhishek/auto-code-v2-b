@@ -33,7 +33,7 @@ export const QueueService = {
     const jobId = uuidv4();
 
     const result = await query(
-      `INSERT INTO processing_queue (
+      `INSERT INTO mc_processing_queue (
         job_id, chart_id, chart_number, status, job_data
       ) VALUES ($1, $2, $3, 'pending', $4)
       RETURNING *`,
@@ -59,7 +59,7 @@ export const QueueService = {
       // Find and lock the next pending job OR failed job ready for retry
       // Failed jobs are only picked up if retry_after has passed (or is null)
       const result = await client.query(
-        `SELECT * FROM processing_queue 
+        `SELECT * FROM mc_processing_queue 
          WHERE 
            status = 'pending' 
            OR (
@@ -83,7 +83,7 @@ export const QueueService = {
 
       // Update job to processing status
       await client.query(
-        `UPDATE processing_queue SET 
+        `UPDATE mc_processing_queue SET 
           status = 'processing',
           worker_id = $1,
           locked_at = CURRENT_TIMESTAMP,
@@ -114,7 +114,7 @@ export const QueueService = {
    */
   async completeJob(jobId) {
     const result = await query(
-      `UPDATE processing_queue SET 
+      `UPDATE mc_processing_queue SET 
         status = 'completed',
         completed_at = CURRENT_TIMESTAMP,
         locked_at = NULL,
@@ -140,7 +140,7 @@ export const QueueService = {
   async failJob(jobId, errorMessage) {
     // First get the current job state
     const currentJob = await query(
-      `SELECT attempts, max_attempts FROM processing_queue WHERE job_id = $1`,
+      `SELECT attempts, max_attempts FROM mc_processing_queue WHERE job_id = $1`,
       [jobId]
     );
 
@@ -160,7 +160,7 @@ export const QueueService = {
     }
 
     const result = await query(
-      `UPDATE processing_queue SET 
+      `UPDATE mc_processing_queue SET 
         status = 'failed',
         error_message = $2,
         locked_at = NULL,
@@ -193,7 +193,7 @@ export const QueueService = {
    */
   async getJob(jobId) {
     const result = await query(
-      `SELECT * FROM processing_queue WHERE job_id = $1`,
+      `SELECT * FROM mc_processing_queue WHERE job_id = $1`,
       [jobId]
     );
     return result.rows[0];
@@ -204,7 +204,7 @@ export const QueueService = {
    */
   async getJobsByChart(chartNumber) {
     const result = await query(
-      `SELECT * FROM processing_queue WHERE chart_number = $1 ORDER BY created_at DESC`,
+      `SELECT * FROM mc_processing_queue WHERE chart_number = $1 ORDER BY created_at DESC`,
       [chartNumber]
     );
     return result.rows;
@@ -225,7 +225,7 @@ export const QueueService = {
         COUNT(*) FILTER (WHERE status = 'failed' AND attempts < max_attempts AND retry_after > NOW()) as waiting_for_retry,
         COUNT(*) FILTER (WHERE status = 'failed' AND attempts < max_attempts AND (retry_after IS NULL OR retry_after <= NOW())) as ready_to_retry,
         COUNT(*) as total
-      FROM processing_queue
+      FROM mc_processing_queue
       WHERE created_at > NOW() - INTERVAL '24 hours'
     `);
     return result.rows[0];
@@ -257,7 +257,7 @@ export const QueueService = {
           THEN EXTRACT(EPOCH FROM (retry_after - NOW()))::integer
           ELSE NULL
         END as retry_in_seconds
-      FROM processing_queue 
+      FROM mc_processing_queue 
       WHERE chart_number = $1 
       ORDER BY created_at DESC 
       LIMIT 1
@@ -271,7 +271,7 @@ export const QueueService = {
    */
   async cleanupOldJobs(olderThanDays = 7) {
     const result = await query(
-      `DELETE FROM processing_queue 
+      `DELETE FROM mc_processing_queue 
        WHERE status = 'completed' 
        AND completed_at < NOW() - INTERVAL '1 day' * $1
        RETURNING id`,
@@ -293,7 +293,7 @@ export const QueueService = {
     const retryAfter = new Date(Date.now() + 30000); // Retry in 30 seconds
 
     const result = await query(
-      `UPDATE processing_queue SET 
+      `UPDATE mc_processing_queue SET 
         status = 'failed',
         worker_id = NULL,
         locked_at = NULL,
@@ -316,7 +316,7 @@ export const QueueService = {
    */
   async retryJob(jobId) {
     const result = await query(
-      `UPDATE processing_queue SET 
+      `UPDATE mc_processing_queue SET 
         status = 'pending',
         attempts = 0,
         error_message = NULL,
@@ -356,7 +356,7 @@ export const QueueService = {
   async getRetryingCount() {
     const result = await query(`
       SELECT COUNT(*) as count
-      FROM processing_queue
+      FROM mc_processing_queue
       WHERE status = 'failed' 
         AND attempts < max_attempts
     `);

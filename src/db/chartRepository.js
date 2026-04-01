@@ -18,21 +18,21 @@ export const ChartRepository = {
     } = chartData;
 
     const result = await query(
-      `INSERT INTO charts (
-        chart_number, mrn, facility, specialty, date_of_service, 
+      `INSERT INTO mc_charts (
+        chart_number, mrn, facility, specialty, date_of_service,
         provider, document_count, ai_status, review_status
       ) VALUES ($1, $2, $3, $4, $5, $6, $7, 'queued', 'pending')
-      ON CONFLICT (chart_number) 
-      DO UPDATE SET 
-        mrn = COALESCE(NULLIF(EXCLUDED.mrn, ''), charts.mrn),
-        facility = COALESCE(NULLIF(EXCLUDED.facility, ''), charts.facility),
-        specialty = COALESCE(NULLIF(EXCLUDED.specialty, ''), charts.specialty),
-        date_of_service = COALESCE(EXCLUDED.date_of_service, charts.date_of_service),
-        provider = COALESCE(NULLIF(EXCLUDED.provider, ''), charts.provider),
-        document_count = charts.document_count + EXCLUDED.document_count,
-        ai_status = CASE 
-          WHEN charts.ai_status IN ('ready', 'submitted') THEN charts.ai_status 
-          ELSE 'queued' 
+      ON CONFLICT (chart_number)
+      DO UPDATE SET
+        mrn = COALESCE(NULLIF(EXCLUDED.mrn, ''), mc_charts.mrn),
+        facility = COALESCE(NULLIF(EXCLUDED.facility, ''), mc_charts.facility),
+        specialty = COALESCE(NULLIF(EXCLUDED.specialty, ''), mc_charts.specialty),
+        date_of_service = COALESCE(EXCLUDED.date_of_service, mc_charts.date_of_service),
+        provider = COALESCE(NULLIF(EXCLUDED.provider, ''), mc_charts.provider),
+        document_count = mc_charts.document_count + EXCLUDED.document_count,
+        ai_status = CASE
+          WHEN mc_charts.ai_status IN ('ready', 'submitted') THEN mc_charts.ai_status
+          ELSE 'queued'
         END,
         updated_at = CURRENT_TIMESTAMP
       RETURNING *`,
@@ -57,12 +57,12 @@ export const ChartRepository = {
     } = chartData;
 
     const result = await query(
-      `INSERT INTO charts (
-        chart_number, mrn, facility, specialty, date_of_service, 
+      `INSERT INTO mc_charts (
+        chart_number, mrn, facility, specialty, date_of_service,
         provider, document_count, ai_status, review_status, processing_started_at
       ) VALUES ($1, $2, $3, $4, $5, $6, $7, 'processing', 'pending', CURRENT_TIMESTAMP)
-      ON CONFLICT (chart_number) 
-      DO UPDATE SET 
+      ON CONFLICT (chart_number)
+      DO UPDATE SET
         mrn = EXCLUDED.mrn,
         facility = EXCLUDED.facility,
         specialty = EXCLUDED.specialty,
@@ -95,7 +95,7 @@ export const ChartRepository = {
     };
 
     const result = await query(
-      `UPDATE charts SET
+      `UPDATE mc_charts SET
         ai_status = 'ready',
         ai_summary = $2,
         diagnosis_codes = $3,
@@ -138,7 +138,7 @@ export const ChartRepository = {
     const aiStatus = willRetry ? 'retry_pending' : 'failed';
 
     const result = await query(
-      `UPDATE charts SET
+      `UPDATE mc_charts SET
         ai_status = $2,
         last_error = $3,
         last_error_at = CURRENT_TIMESTAMP,
@@ -157,7 +157,7 @@ export const ChartRepository = {
    */
   async markFailed(chartNumber, errorMessage) {
     const result = await query(
-      `UPDATE charts SET
+      `UPDATE mc_charts SET
         ai_status = 'failed',
         last_error = $2,
         last_error_at = CURRENT_TIMESTAMP,
@@ -175,7 +175,7 @@ export const ChartRepository = {
    */
   async saveUserModifications(chartNumber, modifications) {
     const result = await query(
-      `UPDATE charts SET
+      `UPDATE mc_charts SET
         user_modifications = $2,
         review_status = 'in_review',
         updated_at = CURRENT_TIMESTAMP
@@ -192,7 +192,7 @@ export const ChartRepository = {
    */
   async submitFinalCodes(chartNumber, finalCodes, submittedBy = null) {
     const result = await query(
-      `UPDATE charts SET
+      `UPDATE mc_charts SET
         final_codes = $2,
         review_status = 'submitted',
         submitted_at = CURRENT_TIMESTAMP,
@@ -210,7 +210,7 @@ export const ChartRepository = {
    * Update chart status
    */
   async updateStatus(chartNumber, aiStatus, reviewStatus = null) {
-    let queryText = `UPDATE charts SET ai_status = $2`;
+    let queryText = `UPDATE mc_charts SET ai_status = $2`;
     const params = [chartNumber, aiStatus];
 
     if (aiStatus === 'processing') {
@@ -233,7 +233,7 @@ export const ChartRepository = {
    */
   async updateReviewStatus(chartNumber, reviewStatus) {
     const result = await query(
-      `UPDATE charts SET review_status = $2, updated_at = CURRENT_TIMESTAMP WHERE chart_number = $1 RETURNING *`,
+      `UPDATE mc_charts SET review_status = $2, updated_at = CURRENT_TIMESTAMP WHERE chart_number = $1 RETURNING *`,
       [chartNumber, reviewStatus]
     );
     return result.rows[0];
@@ -244,7 +244,7 @@ export const ChartRepository = {
    */
   async getByChartNumber(chartNumber) {
     const result = await query(
-      `SELECT * FROM charts WHERE chart_number = $1`,
+      `SELECT * FROM mc_charts WHERE chart_number = $1`,
       [chartNumber]
     );
     return result.rows[0];
@@ -255,7 +255,7 @@ export const ChartRepository = {
    */
   async getWithDocuments(chartNumber) {
     const chartResult = await query(
-      `SELECT * FROM charts WHERE chart_number = $1`,
+      `SELECT * FROM mc_charts WHERE chart_number = $1`,
       [chartNumber]
     );
 
@@ -264,7 +264,7 @@ export const ChartRepository = {
     const chart = chartResult.rows[0];
 
     const docsResult = await query(
-      `SELECT * FROM documents WHERE chart_id = $1 ORDER BY created_at`,
+      `SELECT * FROM mc_documents WHERE chart_id = $1 ORDER BY created_at`,
       [chart.id]
     );
 
@@ -329,7 +329,7 @@ export const ChartRepository = {
 
     // Get total count
     const countResult = await query(
-      `SELECT COUNT(*) FROM charts ${whereClause}`,
+      `SELECT COUNT(*) FROM mc_charts ${whereClause}`,
       params
     );
     const total = parseInt(countResult.rows[0].count);
@@ -347,7 +347,7 @@ export const ChartRepository = {
         last_error, last_error_at, retry_count,
         processing_started_at, processing_completed_at,
         created_at, updated_at
-       FROM charts ${whereClause} 
+       FROM mc_charts ${whereClause} 
        ORDER BY ${sortColumn} ${order} 
        LIMIT $${paramIndex} OFFSET $${paramIndex + 1}`,
       [...params, limit, offset]
@@ -388,7 +388,7 @@ export const ChartRepository = {
           AND processing_completed_at < NOW() - INTERVAL '48 hours'
         ) as sla_critical,
         COUNT(*) as total
-      FROM charts
+      FROM mc_charts
     `);
 
     return result.rows[0];
@@ -407,7 +407,7 @@ export const ChartRepository = {
         COUNT(*) as total_files,
         COUNT(*) FILTER (WHERE mime_type = 'application/pdf') as total_pdfs,
         COUNT(*) FILTER (WHERE mime_type LIKE 'image/%') as total_images
-      FROM documents
+      FROM mc_documents
       WHERE transaction_id IS NOT NULL
     `);
 
@@ -430,7 +430,7 @@ export const ChartRepository = {
         COUNT(*) FILTER (WHERE review_status = 'in_review') as in_review,
         COUNT(*) FILTER (WHERE review_status = 'submitted') as submitted,
         COUNT(*) as total
-      FROM charts
+      FROM mc_charts
     `);
 
     // Get transaction stats (all transactions)
@@ -440,7 +440,7 @@ export const ChartRepository = {
         COUNT(DISTINCT transaction_id) FILTER (WHERE is_group_member = FALSE) as pdf_transactions,
         COUNT(DISTINCT transaction_id) FILTER (WHERE is_group_member = TRUE) as image_group_transactions,
         COUNT(*) as total_files
-      FROM documents
+      FROM mc_documents
       WHERE transaction_id IS NOT NULL
     `);
 
@@ -450,8 +450,8 @@ export const ChartRepository = {
         COUNT(DISTINCT d.transaction_id) as done_transactions,
         COUNT(DISTINCT d.transaction_id) FILTER (WHERE d.is_group_member = FALSE) as done_pdf_transactions,
         COUNT(DISTINCT d.transaction_id) FILTER (WHERE d.is_group_member = TRUE) as done_image_group_transactions
-      FROM documents d
-      JOIN charts c ON c.id = d.chart_id
+      FROM mc_documents d
+      JOIN mc_charts c ON c.id = d.chart_id
       WHERE d.transaction_id IS NOT NULL
       AND c.review_status = 'submitted'
     `);
@@ -503,7 +503,7 @@ export const ChartRepository = {
         chart_number,
         facility,
         submitted_at
-      FROM charts
+      FROM mc_charts
       ${whereClause}
       ORDER BY submitted_at DESC
     `, params);
@@ -516,7 +516,7 @@ export const ChartRepository = {
    */
   async delete(chartNumber) {
     const result = await query(
-      `DELETE FROM charts WHERE chart_number = $1 RETURNING *`,
+      `DELETE FROM mc_charts WHERE chart_number = $1 RETURNING *`,
       [chartNumber]
     );
     return result.rows[0];
@@ -531,7 +531,7 @@ export const ChartRepository = {
         chart_number, mrn, facility, specialty,
         ai_status, last_error, last_error_at, retry_count,
         created_at
-      FROM charts
+      FROM mc_charts
       WHERE ai_status IN ('failed', 'retry_pending')
       ORDER BY last_error_at DESC NULLS LAST
       LIMIT $1
@@ -545,7 +545,7 @@ export const ChartRepository = {
    */
   async resetForRetry(chartNumber) {
     const result = await query(`
-      UPDATE charts SET
+      UPDATE mc_charts SET
         ai_status = 'queued',
         last_error = NULL,
         last_error_at = NULL,
@@ -580,7 +580,7 @@ export const DocumentRepository = {
     } = documentData;
 
     const result = await query(
-      `INSERT INTO documents (
+      `INSERT INTO mc_documents (
         chart_id, document_type, filename, original_name, file_size, mime_type,
         s3_key, s3_url, s3_bucket, ocr_status, transaction_id, transaction_label, is_group_member
       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'pending', $10, $11, $12)
@@ -596,7 +596,7 @@ export const DocumentRepository = {
    */
   async updateOCRResults(documentId, ocrText, ocrProcessingTime = null) {
     const result = await query(
-      `UPDATE documents SET 
+      `UPDATE mc_documents SET 
         ocr_text = $2, 
         ocr_status = 'completed',
         ocr_processing_time = $3,
@@ -614,7 +614,7 @@ export const DocumentRepository = {
    */
   async updateAISummary(documentId, aiDocumentSummary) {
     const result = await query(
-      `UPDATE documents SET 
+      `UPDATE mc_documents SET 
         ai_document_summary = $2
       WHERE id = $1
       RETURNING *`,
@@ -629,7 +629,7 @@ export const DocumentRepository = {
    */
   async markOCRFailed(documentId, errorMessage = null) {
     const result = await query(
-      `UPDATE documents SET 
+      `UPDATE mc_documents SET 
         ocr_status = 'failed',
         ocr_completed_at = CURRENT_TIMESTAMP
       WHERE id = $1
@@ -645,7 +645,7 @@ export const DocumentRepository = {
    */
   async getByChartId(chartId) {
     const result = await query(
-      `SELECT * FROM documents WHERE chart_id = $1 ORDER BY document_type, created_at`,
+      `SELECT * FROM mc_documents WHERE chart_id = $1 ORDER BY document_type, created_at`,
       [chartId]
     );
     return result.rows;
@@ -656,8 +656,8 @@ export const DocumentRepository = {
    */
   async getByChartNumber(chartNumber) {
     const result = await query(
-      `SELECT d.* FROM documents d
-       JOIN charts c ON c.id = d.chart_id
+      `SELECT d.* FROM mc_documents d
+       JOIN mc_charts c ON c.id = d.chart_id
        WHERE c.chart_number = $1
        ORDER BY d.document_type, d.created_at`,
       [chartNumber]
@@ -670,7 +670,7 @@ export const DocumentRepository = {
    */
   async getById(documentId) {
     const result = await query(
-      `SELECT * FROM documents WHERE id = $1`,
+      `SELECT * FROM mc_documents WHERE id = $1`,
       [documentId]
     );
     return result.rows[0];
@@ -681,7 +681,7 @@ export const DocumentRepository = {
    */
   async getByTransactionId(transactionId) {
     const result = await query(
-      `SELECT * FROM documents WHERE transaction_id = $1 ORDER BY created_at`,
+      `SELECT * FROM mc_documents WHERE transaction_id = $1 ORDER BY created_at`,
       [transactionId]
     );
     return result.rows;

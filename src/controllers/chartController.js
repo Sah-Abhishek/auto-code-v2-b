@@ -542,7 +542,7 @@ class ChartController {
           COUNT(*) FILTER (WHERE ai_status = 'failed') as failed_charts,
           COUNT(*) FILTER (WHERE ai_status = 'retry_pending') as retry_pending_charts,
           COUNT(*) FILTER (WHERE created_at >= NOW() - INTERVAL '${periodDays} days') as charts_in_period
-        FROM charts
+        FROM mc_charts
       `);
 
       // Get submitted charts with original codes and modifications for CODE-LEVEL accuracy
@@ -556,7 +556,7 @@ class ChartController {
           submitted_at,
           processing_started_at,
           processing_completed_at
-        FROM charts 
+        FROM mc_charts 
         WHERE review_status = 'submitted'
         AND submitted_at >= NOW() - INTERVAL '${periodDays} days'
       `);
@@ -660,7 +660,7 @@ class ChartController {
         SELECT 
           facility,
           COUNT(*) as chart_count
-        FROM charts
+        FROM mc_charts
         WHERE created_at >= NOW() - INTERVAL '${periodDays} days'
         AND facility IS NOT NULL AND facility != ''
         GROUP BY facility
@@ -673,7 +673,7 @@ class ChartController {
         SELECT 
           AVG(EXTRACT(EPOCH FROM (processing_completed_at - processing_started_at))/60) as avg_processing_min,
           AVG(EXTRACT(EPOCH FROM (submitted_at - processing_completed_at))/60) as avg_review_min
-        FROM charts
+        FROM mc_charts
         WHERE review_status = 'submitted'
         AND processing_completed_at IS NOT NULL
         AND submitted_at >= NOW() - INTERVAL '${periodDays} days'
@@ -686,7 +686,7 @@ class ChartController {
           COUNT(*) FILTER (
             WHERE EXTRACT(EPOCH FROM (submitted_at - processing_completed_at))/3600 <= 24
           ) as within_sla
-        FROM charts
+        FROM mc_charts
         WHERE review_status = 'submitted'
         AND processing_completed_at IS NOT NULL
         AND submitted_at >= NOW() - INTERVAL '${periodDays} days'
@@ -696,7 +696,7 @@ class ChartController {
       const chartsPerDay = await query(`
         SELECT 
           COUNT(*)::float / NULLIF(${periodDays}, 0) as avg_per_day
-        FROM charts
+        FROM mc_charts
         WHERE created_at >= NOW() - INTERVAL '${periodDays} days'
       `);
 
@@ -885,7 +885,7 @@ class ChartController {
     try {
       const { query } = await import('../db/connection.js');
       const result = await query(
-        `SELECT DISTINCT facility FROM charts WHERE facility IS NOT NULL AND facility != '' ORDER BY facility`
+        `SELECT DISTINCT facility FROM mc_charts WHERE facility IS NOT NULL AND facility != '' ORDER BY facility`
       );
 
       res.json({
@@ -905,7 +905,7 @@ class ChartController {
     try {
       const { query } = await import('../db/connection.js');
       const result = await query(
-        `SELECT DISTINCT specialty FROM charts WHERE specialty IS NOT NULL AND specialty != '' ORDER BY specialty`
+        `SELECT DISTINCT specialty FROM mc_charts WHERE specialty IS NOT NULL AND specialty != '' ORDER BY specialty`
       );
 
       res.json({
